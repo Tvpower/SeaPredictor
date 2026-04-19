@@ -75,6 +75,8 @@ def _build_datasets(cfg: TrainConfig, synthetic: bool) -> tuple[Dataset, Dataset
         seq_length=cfg.seq_length,
         seq_features=cfg.seq_features,
         bands=cfg.bands,
+        augment=cfg.augment_train,
+        augment_noise_std=cfg.augment_noise_std,
     )
     val_ds = DebrisDataset(
         data_root=cfg.data_root,
@@ -161,6 +163,10 @@ def train(cfg: TrainConfig, synthetic: bool = False) -> Path:
     print(
         f"[train] in_channels={cfg.in_channels}  seq_features={cfg.seq_features}  "
         f"use_temporal={cfg.use_temporal}"
+    )
+    print(
+        f"[train] augment_train={cfg.augment_train}  "
+        f"augment_noise_std={cfg.augment_noise_std}"
     )
 
     train_ds, val_ds = _build_datasets(cfg, synthetic)
@@ -292,6 +298,11 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--early-stopping-patience", type=int, default=None,
                    help="Stop if val macro-F1 doesn't improve in N epochs (0=off)")
     p.add_argument("--pos-weight-clip", type=float, default=None)
+    p.add_argument("--no-augment", action="store_true",
+                   help="Disable train-time flip/rotate augmentation")
+    p.add_argument("--augment-noise-std", type=float, default=None,
+                   help="Stddev of Gaussian noise added to train tiles "
+                        "(in normalized units; default 0.0 = off)")
     return p
 
 
@@ -329,6 +340,10 @@ def _apply_overrides(cfg: TrainConfig, args: argparse.Namespace) -> TrainConfig:
         cfg.early_stopping_patience = args.early_stopping_patience
     if args.pos_weight_clip is not None:
         cfg.pos_weight_clip = args.pos_weight_clip
+    if args.no_augment:
+        cfg.augment_train = False
+    if args.augment_noise_std is not None:
+        cfg.augment_noise_std = args.augment_noise_std
     return cfg
 
 

@@ -56,6 +56,13 @@ class TrainConfig:
     # bailing. 0 disables (run the full epoch budget).
     early_stopping_patience: int = 0
 
+    # ---- augmentation (train split only) -------------------------------- #
+    # Dihedral flips/rotations are label-preserving for tile-level multi-label
+    # targets, so they're safe to enable by default. Noise stays off until
+    # measured to help — start with 0.05 if you want to try it.
+    augment_train: bool = True
+    augment_noise_std: float = 0.0
+
     # ---- runtime --------------------------------------------------------- #
     device: str = field(default_factory=default_device)
     num_workers: int = -1

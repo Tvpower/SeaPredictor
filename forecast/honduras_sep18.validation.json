@@ -1,0 +1,41 @@
+{
+  "trajectory": "forecast/honduras_sep18.nc",
+  "tier1_plausibility": {
+    "n_particles": 7000,
+    "n_active": 7000,
+    "n_beached": 5357,
+    "beached_fraction": 0.7652857142857142,
+    "displacement_km": {
+      "mean": 14.434173130677005,
+      "median": 10.66706989593729,
+      "max": 67.69373357380246,
+      "p95": 26.819917848781007
+    },
+    "speed_km_per_day": {
+      "mean": 2.0620247329538577,
+      "median": 1.5238671279910414
+    },
+    "mean_drift_bearing_deg": 120.07089033526734,
+    "diffusion_growth_exponent_alpha": 0.022359589592798382,
+    "diffusion_alpha_interpretation": "~0.5 = pure diffusion (good); ~1.0 = ballistic (currents dominant); ~0 = stuck (probably broken)"
+  },
+  "tier2_cross_validation": {
+    "scene_b_date": "2020-09-23",
+    "scene_b_debris_count": 19,
+    "n_active_forecast_particles": 7000,
+    "hit_rate_at_5km": 0.723,
+    "hit_rate_at_10km": 0.7848571428571428,
+    "hit_rate_at_25km": 1.0,
+    "centroid_drift_error_km": 14.039313576201463,
+    "forecast_centroid": [
+      15.782637204170227,
+      -88.20811633300781
+    ],
+    "observed_centroid": [
+      15.81694283349898,
+      -88.33439577411839
+    ],
+    "density_iou": 0.18518518518518517,
+    "grid_resolution_deg": 0.05
+  }
+}

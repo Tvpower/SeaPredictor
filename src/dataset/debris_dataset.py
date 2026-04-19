@@ -24,6 +24,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from .augmentation import augment_image_only
 from .marida_loader import (
     NUM_BANDS,
     NUM_CLASSES,
@@ -63,6 +64,8 @@ class DebrisDataset(Dataset):
         bands: list[int] | None = None,
         return_mask: bool = False,
         oscar_root: str | Path | None | bool = None,
+        augment: bool = False,
+        augment_noise_std: float = 0.0,
     ) -> None:
         """
         Args:
@@ -88,6 +91,15 @@ class DebrisDataset(Dataset):
         self.seq_features = seq_features
         self.bands = bands  # None = all bands
         self.return_mask = return_mask
+        self.augment = augment
+        self.augment_noise_std = augment_noise_std
+        if return_mask and augment:
+            # Tile-level augment isn't aligned with the per-pixel mask.
+            # Fall back to no-op + warn rather than silently corrupting masks.
+            raise ValueError(
+                "augment=True is image-only; combine with return_mask=False or "
+                "use augment_patch() from src.dataset.augmentation for segmentation."
+            )
 
         self.records: list[TileRecord] = self.index.split_records(split)
         if not self.records:
@@ -193,6 +205,9 @@ class DebrisDataset(Dataset):
         image_t = torch.from_numpy(image)
         seq_t = torch.from_numpy(seq)
         label_t = torch.from_numpy(label)
+
+        if self.augment:
+            image_t = augment_image_only(image_t, noise_std=self.augment_noise_std)
 
         if self.return_mask:
             mask = self._load_mask(rec.mask_path)
