@@ -1,0 +1,24 @@
+# env
+.env
+.venv/
+venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# data + checkpoints
+data/raw/
+checkpoints/
+*.pt
+*.pth
+*.nc
+*.tif
+*.tiff
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
