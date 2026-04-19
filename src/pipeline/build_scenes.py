@@ -32,6 +32,7 @@ import numpy as np
 
 from src.dataset.marida_loader import MaridaIndex, default_marida_root
 from src.dataset.oscar_loader import OSCARLoader, default_oscar_root
+from src.inference.cloud_mask import CloudFilterConfig, apply_cloud_filter
 from src.inference.predict import (
     build_sequence,
     iter_dir_tiles,
@@ -131,6 +132,7 @@ def detect_scene(
     oscar: OSCARLoader | None,
     obs_date: date | None,
     bands: list[int] | None,
+    cloud_cfg: CloudFilterConfig | None = None,
 ) -> list[dict]:
     """Run inference over every .tif in a scene directory. Returns tile records."""
     tile_size = int(cfg.get("tile_size", 256))
@@ -146,11 +148,23 @@ def detect_scene(
         seq = build_sequence(cfg, oscar, obs_date, lat, lon)
         probs = run_inference(model, norm, seq, device)
         preds = (probs >= thresholds).astype(np.int32)
+
+        cloud_frac = 0.0
+        cloud_suppressed = False
+        cloud_reason: str | None = None
+        if cloud_cfg is not None:
+            probs, preds, cloud_frac, cloud_suppressed, cloud_reason = apply_cloud_filter(
+                probs, preds, arr, cloud_cfg
+            )
+
         records.append({
             "tile_id": tile_id,
             "probs": [float(p) for p in probs],
             "preds": [int(p) for p in preds],
             "predicted_classes": [i for i, p in enumerate(preds) if p == 1],
+            "cloud_fraction": cloud_frac,
+            "cloud_suppressed": cloud_suppressed,
+            "cloud_suppressed_reason": cloud_reason,
             "geo": {
                 "bounds": geo.get("bounds"),
                 "crs": geo.get("crs"),
@@ -208,6 +222,7 @@ def compute_scene_meta(
     lons: list[float] = []
     lats: list[float] = []
     n_detections = 0
+    n_cloud_suppressed = 0
     per_class_hits = {i: 0 for i in debris_set}
     for rec in records:
         bounds = rec["geo"].get("bounds")
@@ -223,6 +238,8 @@ def compute_scene_meta(
             n_detections += 1
             for i in hits:
                 per_class_hits[i] += 1
+        if rec.get("cloud_suppressed"):
+            n_cloud_suppressed += 1
 
     scene_centroid = None
     bbox = None
@@ -236,6 +253,7 @@ def compute_scene_meta(
         "has_oscar_coverage": has_oscar,
         "n_tiles": len(records),
         "n_detections": n_detections,
+        "n_cloud_suppressed": n_cloud_suppressed,
         "per_class_detections": {
             CLASS_NAMES[i]: per_class_hits[i] for i in sorted(per_class_hits)
         },
@@ -258,6 +276,7 @@ def build(
     only_with_detections: bool = True,
     require_oscar: bool = True,
     scene_allowlist: tuple[str, ...] | None = None,
+    cloud_cfg: CloudFilterConfig | None = CloudFilterConfig(),
 ) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -328,6 +347,7 @@ def build(
             oscar=oscar if cfg.get("use_temporal") else None,
             obs_date=d,
             bands=bands,
+            cloud_cfg=cloud_cfg,
         )
 
         meta = compute_scene_meta(
@@ -361,6 +381,7 @@ def build(
         manifest.append(meta)
         n_kept += 1
         print(f"           tiles={meta['n_tiles']}  detections={meta['n_detections']}  "
+              f"cloud_suppressed={meta['n_cloud_suppressed']}  "
               f"classes={meta['per_class_detections']}")
 
         if limit is not None and n_kept >= limit:
@@ -416,7 +437,25 @@ def main() -> None:
                              "forecasted unless more OSCAR data is downloaded.")
     parser.add_argument("--scenes", type=str, nargs="+", default=None,
                         help="Optional allowlist of scene_ids (e.g. S2_18-9-20_16PCC).")
+    # Cloud filter knobs.
+    parser.add_argument("--no-cloud-filter", action="store_true",
+                        help="Disable post-hoc cloud suppression (debug).")
+    parser.add_argument("--cloud-vis-reflectance", type=float, default=0.18,
+                        help="Mean(B2,B3,B4) reflectance above which a pixel is bright.")
+    parser.add_argument("--cloud-nir-reflectance", type=float, default=0.08,
+                        help="B8 reflectance above which a bright pixel is non-water.")
+    parser.add_argument("--cloud-max-frac", type=float, default=0.50,
+                        help="Tile cloud-pixel fraction above which debris classes are zeroed.")
     args = parser.parse_args()
+
+    cloud_cfg: CloudFilterConfig | None = None
+    if not args.no_cloud_filter:
+        cloud_cfg = CloudFilterConfig(
+            vis_reflectance=args.cloud_vis_reflectance,
+            nir_reflectance=args.cloud_nir_reflectance,
+            max_cloud_frac=args.cloud_max_frac,
+            debris_classes=tuple(args.debris_classes),
+        )
 
     build(
         ckpt=args.ckpt,
@@ -427,6 +466,7 @@ def main() -> None:
         only_with_detections=not args.include_empty,
         require_oscar=not args.ignore_oscar_window,
         scene_allowlist=tuple(args.scenes) if args.scenes else None,
+        cloud_cfg=cloud_cfg,
     )
 
 

@@ -43,6 +43,7 @@ import torch
 
 from src.dataset.marida_loader import MaridaIndex
 from src.dataset.oscar_loader import OSCARLoader, default_oscar_root
+from src.inference.cloud_mask import CloudFilterConfig, apply_cloud_filter
 from src.models import DebrisPredictor
 
 
@@ -195,7 +196,24 @@ def main() -> None:
     parser.add_argument("--lon", type=float, default=None)
     parser.add_argument("--out", type=Path, required=True, help="JSON output path")
     parser.add_argument("--geojson", type=Path, default=None)
+    # Cloud filter knobs (mirror src.pipeline.build_scenes).
+    parser.add_argument("--no-cloud-filter", action="store_true",
+                        help="Disable post-hoc cloud suppression.")
+    parser.add_argument("--cloud-vis-reflectance", type=float, default=0.18)
+    parser.add_argument("--cloud-nir-reflectance", type=float, default=0.08)
+    parser.add_argument("--cloud-max-frac", type=float, default=0.50)
+    parser.add_argument("--debris-classes", type=int, nargs="+", default=[0, 1, 2, 8],
+                        help="Classes suppressed when a tile is cloud-dominated.")
     args = parser.parse_args()
+
+    cloud_cfg: CloudFilterConfig | None = None
+    if not args.no_cloud_filter:
+        cloud_cfg = CloudFilterConfig(
+            vis_reflectance=args.cloud_vis_reflectance,
+            nir_reflectance=args.cloud_nir_reflectance,
+            max_cloud_frac=args.cloud_max_frac,
+            debris_classes=tuple(args.debris_classes),
+        )
 
     model, cfg, device = load_model(args.ckpt)
     print(f"[predict] device={device}  num_classes={cfg.get('num_classes', 15)}  "
@@ -236,6 +254,7 @@ def main() -> None:
     records = []
     features = []
     n = 0
+    n_cloud_suppressed = 0
     for tile_id, arr, geo in tile_iter:
         if arr.shape[1:] != (args.tile_size, args.tile_size):
             # Skip edge fragments shorter than tile_size
@@ -245,11 +264,24 @@ def main() -> None:
         probs = run_inference(model, norm, seq, device)
         preds = (probs >= thresholds).astype(np.int32)
 
+        cloud_frac = 0.0
+        cloud_suppressed = False
+        cloud_reason: str | None = None
+        if cloud_cfg is not None:
+            probs, preds, cloud_frac, cloud_suppressed, cloud_reason = apply_cloud_filter(
+                probs, preds, arr, cloud_cfg
+            )
+            if cloud_suppressed:
+                n_cloud_suppressed += 1
+
         rec = {
             "tile_id": tile_id,
             "probs": [float(p) for p in probs],
             "preds": [int(p) for p in preds],
             "predicted_classes": [i for i, p in enumerate(preds) if p == 1],
+            "cloud_fraction": cloud_frac,
+            "cloud_suppressed": cloud_suppressed,
+            "cloud_suppressed_reason": cloud_reason,
             "geo": {k: v for k, v in geo.items() if k != "transform"},
         }
         records.append(rec)
@@ -278,11 +310,13 @@ def main() -> None:
     args.out.write_text(json.dumps({
         "ckpt": str(args.ckpt),
         "n_tiles": n,
+        "n_cloud_suppressed": n_cloud_suppressed,
         "num_classes": num_classes,
         "thresholds": [float(t) for t in thresholds],
         "records": records,
     }, indent=2))
-    print(f"[predict] wrote {n} tile records -> {args.out}")
+    print(f"[predict] wrote {n} tile records ({n_cloud_suppressed} cloud-suppressed) "
+          f"-> {args.out}")
 
     if args.geojson is not None and features:
         args.geojson.parent.mkdir(parents=True, exist_ok=True)
