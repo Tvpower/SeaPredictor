@@ -22,8 +22,6 @@ data/processed/
 *.tiff
 
 # forecast outputs
-forecast/
-data/forecast/
 predictions.json
 *.geojson
 
