@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 
 from src.forecast.oscar_concat import concat_oscar
+from src.forecast.wind_enrichment import HumanDeltaClient
 from src.forecast.seed import (
     DEFAULT_DEBRIS_CLASSES,
     Seed,
@@ -435,7 +436,31 @@ def main() -> None:
     parser.add_argument("--wind-drift-factor", type=float, default=0.0,
                         help="Per-particle leeway as fraction of wind speed "
                              "(0.02-0.04 typical for floating debris)")
+    parser.add_argument("--raw-weather-log", type=str, default=None,
+                        help="Unstructured text notes about weather/wind conditions "
+                             "to be structured by Human Delta")
     args = parser.parse_args()
+
+    if args.raw_weather_log:
+        client = HumanDeltaClient()
+        wind_params = client.structure_wind_data(args.raw_weather_log)
+        if wind_params["confidence_score"] > 0.7:
+            args.wind_speed = wind_params["wind_speed_ms"]
+            args.wind_dir = wind_params["wind_dir_deg"]
+            args.wind_drift_factor = wind_params["wind_drift_factor"]
+            print(
+                f"[drift] Human Delta enrichment applied  "
+                f"(confidence={wind_params['confidence_score']:.2f}): "
+                f"wind_speed={args.wind_speed:.2f} m/s  "
+                f"wind_dir={args.wind_dir:.1f} deg  "
+                f"wind_drift_factor={args.wind_drift_factor:.3f}"
+            )
+        else:
+            print(
+                f"[drift] Human Delta confidence too low "
+                f"({wind_params['confidence_score']:.2f} <= 0.70); "
+                "keeping manual wind parameters."
+            )
 
     run_drift(
         predictions_path=args.predictions,
