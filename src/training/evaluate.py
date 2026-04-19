@@ -1,4 +1,4 @@
-"""Validation / evaluation utilities."""
+"""Validation / evaluation utilities for pixel-wise segmentation."""
 from __future__ import annotations
 
 import argparse
@@ -9,35 +9,37 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchmetrics.classification import (
-    BinaryAccuracy,
-    BinaryF1Score,
-    BinaryJaccardIndex,
-    BinaryPrecision,
-    BinaryRecall,
+    MulticlassAccuracy,
+    MulticlassF1Score,
+    MulticlassJaccardIndex,
+    MulticlassPrecision,
+    MulticlassRecall,
 )
 
-from src.dataset import DebrisDataset, SyntheticDebrisDataset
-from src.models import DebrisPredictor
+from src.models.segmentation_model import DebrisSegmenter, FocalLoss
 from src.training.config import TrainConfig
+
+
+DEBRIS_CLASS_ID = 1  # class index for Marine Debris after aggregate_classes
 
 
 @dataclass
 class EvalMetrics:
     loss: float
-    accuracy: float
-    precision: float
-    recall: float
-    f1: float
-    iou: float
+    pixel_acc: float       # overall pixel accuracy
+    mean_iou: float        # mean IoU across all 12 classes
+    debris_iou: float      # IoU for Marine Debris (class 1) — primary metric
+    debris_f1: float       # F1  for Marine Debris (class 1)
+    debris_recall: float   # recall for Marine Debris — prioritise not missing debris
 
     def as_dict(self) -> dict[str, float]:
         return self.__dict__.copy()
 
     def __str__(self) -> str:
         return (
-            f"loss={self.loss:.4f} acc={self.accuracy:.3f} "
-            f"P={self.precision:.3f} R={self.recall:.3f} "
-            f"F1={self.f1:.3f} IoU={self.iou:.3f}"
+            f"loss={self.loss:.4f} px_acc={self.pixel_acc:.3f} "
+            f"mIoU={self.mean_iou:.3f} "
+            f"debris[IoU={self.debris_iou:.3f} F1={self.debris_f1:.3f} R={self.debris_recall:.3f}]"
         )
 
 
@@ -47,59 +49,47 @@ def evaluate(
     loader: DataLoader,
     criterion: nn.Module,
     device: str,
+    num_classes: int = 12,
 ) -> EvalMetrics:
     model.eval()
 
-    acc = BinaryAccuracy().to(device)
-    prec = BinaryPrecision().to(device)
-    rec = BinaryRecall().to(device)
-    f1 = BinaryF1Score().to(device)
-    iou = BinaryJaccardIndex().to(device)
+    acc = MulticlassAccuracy(num_classes=num_classes, average="micro").to(device)
+    miou = MulticlassJaccardIndex(num_classes=num_classes, average="macro").to(device)
+    # Per-class metrics for debris: index = DEBRIS_CLASS_ID
+    iou_per = MulticlassJaccardIndex(num_classes=num_classes, average="none").to(device)
+    f1_per = MulticlassF1Score(num_classes=num_classes, average="none").to(device)
+    rec_per = MulticlassRecall(num_classes=num_classes, average="none").to(device)
 
     total_loss = 0.0
     total_n = 0
-    for image, seq, label in loader:
+
+    for image, mask, _conf in loader:
         image = image.to(device, non_blocking=True)
-        seq = seq.to(device, non_blocking=True)
-        label = label.to(device, non_blocking=True)
+        mask = mask.to(device, non_blocking=True)
 
-        logits = model(image, seq)
-        loss = criterion(logits, label)
-        total_loss += loss.item() * label.size(0)
-        total_n += label.size(0)
+        logits = model(image)                       # (B, C, H, W)
+        loss = criterion(logits, mask)
+        total_loss += loss.item() * mask.size(0)
+        total_n += mask.size(0)
 
-        probs = torch.sigmoid(logits)
-        preds = (probs >= 0.5).int()
-        target = label.int()
-        acc.update(preds, target)
-        prec.update(preds, target)
-        rec.update(preds, target)
-        f1.update(preds, target)
-        iou.update(preds, target)
+        preds = logits.argmax(dim=1)               # (B, H, W)
+        acc.update(preds, mask)
+        miou.update(preds, mask)
+        iou_per.update(preds, mask)
+        f1_per.update(preds, mask)
+        rec_per.update(preds, mask)
+
+    iou_classes = iou_per.compute()
+    f1_classes = f1_per.compute()
+    rec_classes = rec_per.compute()
 
     return EvalMetrics(
         loss=total_loss / max(total_n, 1),
-        accuracy=acc.compute().item(),
-        precision=prec.compute().item(),
-        recall=rec.compute().item(),
-        f1=f1.compute().item(),
-        iou=iou.compute().item(),
-    )
-
-
-def _load_eval_dataset(cfg: TrainConfig, synthetic: bool) -> torch.utils.data.Dataset:
-    if synthetic:
-        return SyntheticDebrisDataset(
-            n_samples=64,
-            seq_length=cfg.seq_length,
-            seq_features=cfg.seq_features,
-            in_channels=cfg.in_channels,
-        )
-    return DebrisDataset(
-        data_root=cfg.data_root,
-        split="val",
-        use_hycom=cfg.use_hycom,
-        seq_length=cfg.seq_length,
+        pixel_acc=acc.compute().item(),
+        mean_iou=miou.compute().item(),
+        debris_iou=iou_classes[DEBRIS_CLASS_ID].item(),
+        debris_f1=f1_classes[DEBRIS_CLASS_ID].item(),
+        debris_recall=rec_classes[DEBRIS_CLASS_ID].item(),
     )
 
 
@@ -107,28 +97,39 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=Path, required=True)
     parser.add_argument("--synthetic", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=8)
     args = parser.parse_args()
 
     cfg = TrainConfig(batch_size=args.batch_size)
-    cfg.derive_seq_features()
 
-    dataset = _load_eval_dataset(cfg, args.synthetic)
+    if args.synthetic:
+        from src.training.train import _SyntheticSegDataset
+        dataset = _SyntheticSegDataset(32, cfg.in_channels, cfg.num_classes)
+    else:
+        from src.dataset.marida_dataset import MARIDADataset
+        from src.dataset.normalization import load_stats
+        norm_stats = load_stats(str(cfg.norm_stats_path))
+        dataset = MARIDADataset(
+            split_file=str(cfg.split_dir / "val_X.txt"),
+            patches_dir=str(cfg.patches_dir),
+            augment=False,
+            add_indices=True,
+            aggregate=True,
+            norm_stats=norm_stats,
+        )
+
     loader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=False)
 
-    model = DebrisPredictor(
+    model = DebrisSegmenter(
         in_channels=cfg.in_channels,
-        seq_features=cfg.seq_features,
-        cnn_pretrained=False,
-        use_temporal=cfg.use_temporal,
+        num_classes=cfg.num_classes,
+        pretrained=False,
     ).to(cfg.device)
     state = torch.load(args.ckpt, map_location=cfg.device)
     model.load_state_dict(state["model"])
 
-    pos_weight = torch.tensor([cfg.pos_weight], device=cfg.device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    metrics = evaluate(model, loader, criterion, cfg.device)
+    criterion = FocalLoss(gamma=cfg.focal_gamma)
+    metrics = evaluate(model, loader, criterion, cfg.device, cfg.num_classes)
     print(f"[eval] {metrics}")
 
 

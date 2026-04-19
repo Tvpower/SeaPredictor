@@ -1,4 +1,4 @@
-"""Training configuration. CLI flags in `train.py` override these defaults."""
+"""Training configuration for segmentation. CLI flags in train.py override these defaults."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -18,22 +18,21 @@ def default_device() -> str:
 @dataclass
 class TrainConfig:
     # data
-    data_root: Path = Path("data/raw")
-    use_hycom: bool = False
-    seq_length: int = 30
-    seq_features: int = 4  # 6 if use_hycom
+    marida_root: Path = Path("data/raw/MARIDA")
 
     # model
-    in_channels: int = 3
+    in_channels: int = 19           # 11 raw bands + 8 spectral indices
+    num_classes: int = 12           # classes 0–11 after aggregate_classes
     cnn_pretrained: bool = True
-    use_temporal: bool = True
+
+    # loss
+    focal_gamma: float = 2.0        # Focal Loss gamma; 0.0 falls back to plain CE
 
     # optimization
     epochs: int = 30
-    batch_size: int = 16
+    batch_size: int = 8             # segmentation is memory-heavier than tile-level
     lr: float = 1e-4
     weight_decay: float = 1e-4
-    pos_weight: float = 10.0  # debris : non-debris ratio
     grad_clip: float = 1.0
 
     # runtime
@@ -45,6 +44,18 @@ class TrainConfig:
     ckpt_dir: Path = Path("checkpoints")
     log_every: int = 20
 
-    def derive_seq_features(self) -> None:
-        """Keep seq_features in sync with use_hycom."""
-        self.seq_features = 6 if self.use_hycom else 4
+    @property
+    def split_dir(self) -> Path:
+        return self.marida_root / "splits"
+
+    @property
+    def patches_dir(self) -> Path:
+        return self.marida_root / "patches"
+
+    @property
+    def norm_stats_path(self) -> Path:
+        return self.marida_root / "norm_stats.json"
+
+    @property
+    def class_weights_path(self) -> Path:
+        return self.marida_root / "class_weights.json"
