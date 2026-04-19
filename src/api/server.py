@@ -49,7 +49,10 @@ from src.forecast.seed import DEFAULT_DEBRIS_CLASSES
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENES_DIR = REPO_ROOT / "web" / "scenes"
 FORECAST_CACHE = REPO_ROOT / "web" / "forecast_cache"
-WEB_APP_DIR = REPO_ROOT / "web" / "app"
+# New Next.js UI (built via `npm run build:static` in frontend/frontend/).
+WEB_APP_DIR = REPO_ROOT / "frontend" / "frontend" / "out"
+# Old Cesium HTML UI, kept around as a fallback / debug view at /legacy/.
+LEGACY_APP_DIR = REPO_ROOT / "web" / "legacy"
 FORECAST_CACHE.mkdir(parents=True, exist_ok=True)
 
 
@@ -387,15 +390,31 @@ def list_cached_forecasts() -> JSONResponse:
 
 
 # --------------------------------------------------------------------------- #
-# Static frontend (must be mounted LAST so /api/* routes win)                 #
+# Static frontends (must be mounted LAST so /api/* routes win)                #
 # --------------------------------------------------------------------------- #
+# Legacy Cesium UI: always at /legacy/ when present.
+if LEGACY_APP_DIR.is_dir():
+    app.mount(
+        "/legacy",
+        StaticFiles(directory=str(LEGACY_APP_DIR), html=True),
+        name="legacy",
+    )
+
+# New Next.js static export at /. Only mounted when the build artifacts exist;
+# in dev you'd run `npm run dev` separately on :3000 and skip this entirely.
 if WEB_APP_DIR.is_dir():
     app.mount("/", StaticFiles(directory=str(WEB_APP_DIR), html=True), name="app")
 
 
 def _maybe_run_as_script() -> None:
     import uvicorn
-    uvicorn.run("src.api.server:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run(
+        "src.api.server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        reload_dirs=[str(REPO_ROOT / "src")],
+    )
 
 
 if __name__ == "__main__":
