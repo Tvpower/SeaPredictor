@@ -30,7 +30,7 @@
   /* ---- Left control panel ---- */
   #panel {
     position: absolute; top: 12px; left: 12px;
-    width: 340px; max-height: calc(100vh - 24px); overflow-y: auto;
+    width: 360px; max-height: calc(100vh - 24px); overflow-y: auto;
     background: var(--panel); border-radius: 8px; padding: 16px;
     box-shadow: 0 6px 24px rgba(0,0,0,0.45); z-index: 1000;
     backdrop-filter: blur(10px);
@@ -38,7 +38,8 @@
   #panel h1 { font-size: 16px; margin: 0 0 2px; font-weight: 700; letter-spacing: 0.01em; }
   #panel .subtitle { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
   #panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
-              color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
+              color: var(--muted); margin: 18px 0 6px; font-weight: 600;
+              display: flex; align-items: center; justify-content: space-between; }
 
   /* ---- Scene list ---- */
   .scene {
@@ -62,8 +63,21 @@
   }
   input[type="number"]:focus { outline: none; border-color: var(--accent); }
 
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
   .class-row { display: flex; align-items: center; font-size: 12px; padding: 3px 0; cursor: pointer; }
   .class-row input { margin-right: 8px; }
+
+  .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 12px; padding: 6px 8px; margin-top: 8px;
+    background: rgba(255,255,255,0.03); border-radius: 4px;
+    cursor: pointer; user-select: none;
+  }
+  .toggle-row:hover { background: rgba(255,255,255,0.06); }
+  .toggle-row input { margin: 0; }
+  .toggle-row .lab { color: var(--fg); font-weight: 500; }
+  .toggle-row .help { color: var(--muted); font-size: 10px; margin-top: 2px; display: block; }
 
   button {
     width: 100%; padding: 10px; border: none; border-radius: 4px;
@@ -75,6 +89,12 @@
   button.primary:disabled { background: #3a4a5d; cursor: not-allowed; }
   button.ghost { background: rgba(255,255,255,0.06); color: var(--fg); margin-top: 6px; }
   button.ghost:hover { background: var(--panel-hover); }
+
+  .preset-row { display: flex; gap: 6px; margin-top: 4px; }
+  .preset-row button { margin-top: 0; padding: 6px 8px; font-size: 11px;
+                       background: rgba(100,200,255,0.10); color: var(--accent);
+                       border: 1px solid rgba(100,200,255,0.25); flex: 1; }
+  .preset-row button:hover { background: rgba(100,200,255,0.18); }
 
   .stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px;
            font-size: 12px; margin-top: 10px; padding-top: 10px;
@@ -101,10 +121,20 @@
     position: absolute; top: 12px; right: 12px;
     background: var(--panel); padding: 10px 14px; border-radius: 6px;
     font-size: 11px; z-index: 1000; backdrop-filter: blur(10px);
+    max-width: 220px;
   }
   .legend-row { display: flex; align-items: center; margin: 3px 0; }
   .legend-swatch { width: 14px; height: 4px; border-radius: 2px; margin-right: 8px; }
   .legend-swatch.dot { height: 8px; width: 8px; border-radius: 50%; }
+
+  /* ---- Wind compass mini-viz ---- */
+  .windviz {
+    display: flex; align-items: center; gap: 10px; margin-top: 6px;
+    padding: 6px 8px; background: rgba(255,255,255,0.03); border-radius: 4px;
+    font-size: 11px;
+  }
+  .windviz svg { flex-shrink: 0; }
+  .windviz .wd { font-family: ui-monospace, monospace; color: var(--accent); }
 
   /* ---- Scrollbar ---- */
   #panel::-webkit-scrollbar { width: 6px; }
@@ -118,6 +148,9 @@
     border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Tighten Cesium's animation/timeline footprint at the bottom-left. */
+  .cesium-viewer-bottom { left: 380px !important; }
 </style>
 </head>
 <body>
@@ -133,20 +166,74 @@
 
   <div id="forecastForm" style="display:none;">
     <h2>Forecast Parameters</h2>
-    <label>Forecast horizon (days)</label>
-    <input type="number" id="days" value="7" min="1" max="30" step="1">
+    <div class="grid2">
+      <div>
+        <label>Horizon (days)</label>
+        <input type="number" id="days" value="7" min="1" max="30" step="1">
+      </div>
+      <div>
+        <label>Particles / detection</label>
+        <input type="number" id="nPerSeed" value="100" min="10" max="500" step="10">
+      </div>
+      <div>
+        <label>Seed radius (m)</label>
+        <input type="number" id="seedRadius" value="1000" min="100" max="10000" step="100">
+      </div>
+      <div>
+        <label>Diffusivity (m²/s)</label>
+        <input type="number" id="diffusivity" value="10" min="0" max="500" step="1">
+      </div>
+    </div>
 
-    <label>Particles per detection</label>
-    <input type="number" id="nPerSeed" value="100" min="10" max="500" step="10">
+    <h2>
+      <span>Wind Forcing</span>
+      <span style="text-transform:none; letter-spacing:0; color:var(--muted); font-weight:400; font-size:10px;">leeway model</span>
+    </h2>
+    <div class="grid2">
+      <div>
+        <label>Wind speed (m/s)</label>
+        <input type="number" id="windSpeed" value="0" min="0" max="40" step="0.5">
+      </div>
+      <div>
+        <label>Wind from (deg)</label>
+        <input type="number" id="windDir" value="90" min="0" max="359" step="5">
+      </div>
+      <div>
+        <label>Leeway factor (%)</label>
+        <input type="number" id="windFactor" value="2.5" min="0" max="10" step="0.1">
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <div class="windviz" id="windViz">
+          <svg width="36" height="36" viewBox="-20 -20 40 40">
+            <circle cx="0" cy="0" r="18" fill="none" stroke="#2a3a4d" stroke-width="1"/>
+            <text x="0" y="-12" font-size="6" fill="#7a8899" text-anchor="middle">N</text>
+            <g id="windArrow" transform="rotate(0)">
+              <line x1="0" y1="-14" x2="0" y2="14" stroke="#64c8ff" stroke-width="2"/>
+              <polygon points="0,14 -3,8 3,8" fill="#64c8ff"/>
+            </g>
+          </svg>
+          <span class="wd" id="windText">off</span>
+        </div>
+      </div>
+    </div>
 
-    <label>Seed radius (m)</label>
-    <input type="number" id="seedRadius" value="1000" min="100" max="10000" step="100">
+    <div class="preset-row">
+      <button id="presetCalm" type="button">Calm</button>
+      <button id="presetTrade" type="button">Trade wind</button>
+      <button id="presetStorm" type="button">Storm</button>
+    </div>
 
-    <label>Horizontal diffusivity (m²/s)</label>
-    <input type="number" id="diffusivity" value="10" min="0" max="500" step="1">
-
-    <label>Debris classes to track</label>
+    <h2>Debris Classes</h2>
     <div id="classList"></div>
+
+    <label class="toggle-row" for="animateToggle">
+      <span>
+        <span class="lab">Animate playback</span>
+        <span class="help">Time-stepped particles via Cesium clock</span>
+      </span>
+      <input type="checkbox" id="animateToggle" checked>
+    </label>
 
     <button id="runForecast" class="primary">Run Forecast</button>
     <button id="clearForecast" class="ghost">Clear Forecast Layers</button>
@@ -160,13 +247,12 @@
   <div class="legend-row"><span class="legend-swatch dot" style="background:#ff4757"></span>Scene hotspot (count = detections)</div>
   <div class="legend-row"><span class="legend-swatch" style="background:#ff4757"></span>Debris-positive tile</div>
   <div class="legend-row"><span class="legend-swatch" style="background:#50b4ff"></span>Particle path (drift)</div>
-  <div class="legend-row"><span class="legend-swatch dot" style="background:#ffa502"></span>Final position</div>
+  <div class="legend-row"><span class="legend-swatch dot" style="background:#ffa502"></span>Animated particle</div>
 </div>
 
 <div id="status"></div>
 
 <script>
-  // Must be set BEFORE loading Cesium so its workers / assets resolve.
   window.CESIUM_BASE_URL = 'https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/';
 </script>
 <script src="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
@@ -175,9 +261,10 @@
 
   // ------------------------------------------------------------------------ //
   // Cesium viewer — OSM imagery, no Ion token, ellipsoid terrain             //
+  // The animation + timeline widgets are enabled so the CZML clock drives    //
+  // the time-varying particle entities.                                      //
   // ------------------------------------------------------------------------ //
   const viewer = new Cesium.Viewer('cesiumContainer', {
-    // OpenStreetMap tiles (no token). Attribution is kept via the credit container.
     imageryProvider: new Cesium.UrlTemplateImageryProvider({
       url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
       credit: '© OpenStreetMap contributors',
@@ -189,20 +276,19 @@
     homeButton: false,
     sceneModePicker: false,
     navigationHelpButton: false,
-    animation: false,
-    timeline: false,
+    animation: true,
+    timeline: true,
     fullscreenButton: false,
     infoBox: true,
     selectionIndicator: false,
-    requestRenderMode: true,
+    requestRenderMode: false, // animations need continuous render
   });
 
-  // Dark "space" around the globe for contrast.
   viewer.scene.backgroundColor = Cesium.Color.fromCssColorString('#0a0e14');
   viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a2332');
   viewer.scene.globe.showGroundAtmosphere = true;
+  viewer.clock.shouldAnimate = false;
 
-  // Start with a view of Earth.
   viewer.camera.setView({
     destination: Cesium.Cartesian3.fromDegrees(-60, 15, 18_000_000),
   });
@@ -215,11 +301,12 @@
     classNames: [],
     defaultClasses: [],
     currentScene: null,
-    sceneMarkers: [],            // point entities
-    layers: {                     // GeoJsonDataSources currently on the globe
+    sceneMarkers: [],
+    layers: {
       detections: null,
       paths: null,
       final: null,
+      czml: null,
     },
   };
 
@@ -257,12 +344,36 @@
   function clearForecastLayers() {
     removeLayer('paths');
     removeLayer('final');
+    removeLayer('czml');
+    viewer.clock.shouldAnimate = false;
     $('forecastStats').style.display = 'none';
   }
 
   function clearAllOverlays() {
     removeLayer('detections');
     clearForecastLayers();
+  }
+
+  // ------------------------------------------------------------------------ //
+  // Wind controls (compass + presets)                                        //
+  // ------------------------------------------------------------------------ //
+  function updateWindViz() {
+    const speed = +$('windSpeed').value;
+    const dir = +$('windDir').value;
+    // Wind FROM convention. Arrow points in the direction the wind is going TO,
+    // so we rotate by (dir + 180) deg.
+    const arrowDeg = (dir + 180) % 360;
+    $('windArrow').setAttribute('transform', `rotate(${arrowDeg})`);
+    $('windText').textContent = speed > 0
+      ? `${speed.toFixed(1)} m/s · ${dir.toFixed(0)}°`
+      : 'off';
+  }
+
+  function applyPreset(speed, dir, factor) {
+    $('windSpeed').value = speed;
+    $('windDir').value = dir;
+    $('windFactor').value = factor;
+    updateWindViz();
   }
 
   // ------------------------------------------------------------------------ //
@@ -360,15 +471,12 @@
     clearAllOverlays();
     clearStatus();
 
-    // List UI
     document.querySelectorAll('.scene').forEach((el) => {
       el.classList.toggle('active', el.dataset.sceneId === s.scene_id);
     });
 
-    // Form UI
     $('forecastForm').style.display = 'block';
 
-    // Camera
     if (flyTo && s.bbox_wgs84) {
       const [w, sLat, e, nLat] = s.bbox_wgs84;
       const pad = 0.15;
@@ -378,7 +486,6 @@
       });
     }
 
-    // Detection polygons
     try {
       const ds = await Cesium.GeoJsonDataSource.load(
         `/api/scenes/${encodeURIComponent(s.scene_id)}/detections`,
@@ -428,7 +535,13 @@
       seed_radius_m: +$('seedRadius').value,
       horizontal_diffusivity: +$('diffusivity').value,
       debris_classes: classes,
+      wind_speed_ms: +$('windSpeed').value,
+      wind_dir_deg: +$('windDir').value,
+      // UI surfaces leeway as % to be more intuitive; backend wants fraction.
+      wind_drift_factor: (+$('windFactor').value) / 100.0,
     };
+
+    const animate = $('animateToggle').checked;
 
     clearForecastLayers();
     btn.disabled = true;
@@ -443,16 +556,15 @@
         body: JSON.stringify(body),
       });
 
-      // Per-particle paths (polylines).
+      // Static layers (always loaded so the user has trails + final spread).
       const pathDs = await Cesium.GeoJsonDataSource.load(resp.paths_url, {
-        stroke: Cesium.Color.fromCssColorString('#50b4ff').withAlpha(0.22),
+        stroke: Cesium.Color.fromCssColorString('#50b4ff').withAlpha(animate ? 0.10 : 0.22),
         strokeWidth: 1,
         clampToGround: true,
       });
       await viewer.dataSources.add(pathDs);
       state.layers.paths = pathDs;
 
-      // Final positions (points).
       const finalDs = await Cesium.GeoJsonDataSource.load(resp.final_url, {
         markerSize: 8,
         markerColor: Cesium.Color.fromCssColorString('#ffa502'),
@@ -461,16 +573,51 @@
       await viewer.dataSources.add(finalDs);
       state.layers.final = finalDs;
 
-      // Stats panel
+      // Time-animated CZML layer when available + enabled.
+      if (animate && resp.czml_url) {
+        try {
+          const czmlDs = await Cesium.CzmlDataSource.load(resp.czml_url);
+          await viewer.dataSources.add(czmlDs);
+          state.layers.czml = czmlDs;
+
+          // Use the CZML's clock if its document defined one.
+          const docClock = czmlDs.clock;
+          if (docClock) {
+            viewer.clock.startTime = docClock.startTime.clone();
+            viewer.clock.stopTime = docClock.stopTime.clone();
+            viewer.clock.currentTime = docClock.currentTime.clone();
+            viewer.clock.clockRange = docClock.clockRange;
+            viewer.clock.multiplier = Math.max(docClock.multiplier, 600);
+            viewer.timeline.zoomTo(docClock.startTime, docClock.stopTime);
+          } else if (resp.stats?.time_start && resp.stats?.time_end) {
+            const s = Cesium.JulianDate.fromIso8601(resp.stats.time_start);
+            const e = Cesium.JulianDate.fromIso8601(resp.stats.time_end);
+            viewer.clock.startTime = s.clone();
+            viewer.clock.stopTime = e.clone();
+            viewer.clock.currentTime = s.clone();
+            viewer.clock.clockRange = Cesium.ClockRange.LOOP_STOP;
+            viewer.clock.multiplier = 3600;
+            viewer.timeline.zoomTo(s, e);
+          }
+          viewer.clock.shouldAnimate = true;
+        } catch (e) {
+          console.warn('CZML load failed, falling back to static view', e);
+        }
+      }
+
       const wall = ((performance.now() - t0) / 1000).toFixed(1);
       const cachedTag = resp.cached
         ? `<span class="v cached">cached</span>`
         : `<span class="v">${resp.stats.elapsed_s}s</span>`;
+      const animTag = state.layers.czml
+        ? `<span class="v cached">on</span>`
+        : `<span class="v">off</span>`;
       $('forecastStats').style.display = 'grid';
       $('forecastStats').innerHTML = `
         <span class="k">Particles</span><span class="v">${resp.stats.n_particles}</span>
         <span class="k">Paths</span><span class="v">${resp.stats.n_features_paths}</span>
         <span class="k">Final pts</span><span class="v">${resp.stats.n_features_final}</span>
+        <span class="k">Animation</span>${animTag}
         <span class="k">Compute</span>${cachedTag}
         <span class="k">Wall time</span><span class="v">${wall}s</span>
         <span class="k">Cache key</span><span class="v" style="font-size:10px;">${resp.cache_key}</span>
@@ -497,15 +644,19 @@
     clearForecastLayers();
     setStatus('Forecast layers cleared.', 'info');
   });
+  $('windSpeed').addEventListener('input', updateWindViz);
+  $('windDir').addEventListener('input', updateWindViz);
+  $('presetCalm').addEventListener('click', () => applyPreset(0, 90, 2.5));
+  $('presetTrade').addEventListener('click', () => applyPreset(6, 90, 2.5));
+  $('presetStorm').addEventListener('click', () => applyPreset(15, 90, 3.5));
 
-  // Click a marker on the globe -> select that scene.
   viewer.selectedEntityChanged.addEventListener((entity) => {
     if (entity && entity._sceneMeta) {
       selectScene(entity._sceneMeta, { flyTo: true });
     }
   });
 
-  // Boot.
+  updateWindViz();
   loadScenes();
 </script>
 </body>

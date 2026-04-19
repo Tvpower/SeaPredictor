@@ -2,24 +2,25 @@
 
 Endpoints (all under /api):
 
-    GET  /scenes                      -> manifest of cached scenes
-    GET  /scenes/{scene_id}           -> meta.json for one scene
+    GET  /scenes                       -> manifest of cached scenes
+    GET  /scenes/{scene_id}            -> meta.json for one scene
     GET  /scenes/{scene_id}/detections -> detections.geojson (map-ready polygons)
-    GET  /scenes/{scene_id}/predictions -> full predictions.json (debug / inspection)
+    GET  /scenes/{scene_id}/predictions -> full predictions.json (debug)
 
-    POST /forecast                    -> run OpenDrift on a cached scene.
-                                         Body: see ForecastRequest.
-                                         Response: see ForecastResponse.
+    POST /forecast                     -> run OpenDrift on a cached scene.
+                                          Body: see ForecastRequest.
+                                          Response: see ForecastResponse.
 
     GET  /forecast/{cache_key}/paths   -> cached per-particle paths GeoJSON
     GET  /forecast/{cache_key}/final   -> cached final positions GeoJSON
+    GET  /forecast/{cache_key}/czml    -> time-animated CZML for Cesium
     GET  /forecast/{cache_key}         -> stats + param echo
 
-The server keeps *everything* on the local filesystem:
+The server keeps everything on the local filesystem:
 
     web/scenes/           pre-built by src.pipeline.build_scenes
-    web/forecast_cache/   lazily populated by the /forecast endpoint, keyed
-                          by a hash of (scene_id, run params).
+    web/forecast_cache/   lazily populated by /forecast, keyed by a hash of
+                          (scene_id, run params).
 
 OpenDrift is not thread-safe; we serialize forecast runs with a module-level
 lock. For a single-user hackathon demo this is fine.
@@ -34,7 +35,6 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,9 +46,6 @@ from src.forecast.drift import run_drift
 from src.forecast.seed import DEFAULT_DEBRIS_CLASSES
 
 
-# --------------------------------------------------------------------------- #
-# Paths                                                                       #
-# --------------------------------------------------------------------------- #
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENES_DIR = REPO_ROOT / "web" / "scenes"
 FORECAST_CACHE = REPO_ROOT / "web" / "forecast_cache"
@@ -56,12 +53,8 @@ WEB_APP_DIR = REPO_ROOT / "web" / "app"
 FORECAST_CACHE.mkdir(parents=True, exist_ok=True)
 
 
-# --------------------------------------------------------------------------- #
-# App                                                                         #
-# --------------------------------------------------------------------------- #
-app = FastAPI(title="SeaPredictor API", version="0.1.0")
+app = FastAPI(title="SeaPredictor API", version="0.2.0")
 
-# Wide open during dev; tighten before prod.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -85,6 +78,10 @@ class ForecastRequest(BaseModel):
     debris_classes: list[int] = Field(default_factory=lambda: list(DEFAULT_DEBRIS_CLASSES))
     min_prob: float = Field(0.0, ge=0.0, le=1.0)
     timestep_minutes: int = Field(30, ge=5, le=180)
+    # Wind forcing (uniform constant field). speed=0 disables it entirely.
+    wind_speed_ms: float = Field(0.0, ge=0.0, le=40.0)
+    wind_dir_deg: float = Field(0.0, ge=0.0, lt=360.0)
+    wind_drift_factor: float = Field(0.0, ge=0.0, le=0.10)
 
 
 class ForecastStats(BaseModel):
@@ -94,6 +91,9 @@ class ForecastStats(BaseModel):
     n_features_paths: int
     n_features_final: int
     elapsed_s: float
+    has_czml: bool = False
+    time_start: str | None = None
+    time_end: str | None = None
 
 
 class ForecastResponse(BaseModel):
@@ -103,6 +103,7 @@ class ForecastResponse(BaseModel):
     params: ForecastRequest
     paths_url: str
     final_url: str
+    czml_url: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -130,6 +131,9 @@ def _cache_key(req: ForecastRequest) -> str:
         "debris_classes": sorted(req.debris_classes),
         "min_prob": round(req.min_prob, 4),
         "timestep_minutes": req.timestep_minutes,
+        "wind_speed_ms": round(req.wind_speed_ms, 3),
+        "wind_dir_deg": round(req.wind_dir_deg, 1),
+        "wind_drift_factor": round(req.wind_drift_factor, 4),
     }
     blob = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha1(blob).hexdigest()[:16]
@@ -143,6 +147,25 @@ def _count_features(path: Path) -> int:
         return len(data.get("features", []))
     except json.JSONDecodeError:
         return 0
+
+
+def _czml_time_window(czml_path: Path) -> tuple[str | None, str | None]:
+    """Pull (start_iso, end_iso) from the CZML document clock, or (None, None)."""
+    if not czml_path.exists():
+        return None, None
+    try:
+        doc = json.loads(czml_path.read_text())
+        if not doc:
+            return None, None
+        first = doc[0] if isinstance(doc, list) else doc
+        clock = first.get("clock", {}) if isinstance(first, dict) else {}
+        interval = clock.get("interval")
+        if not interval or "/" not in interval:
+            return None, None
+        start, end = interval.split("/", 1)
+        return start, end
+    except (json.JSONDecodeError, KeyError, IndexError, AttributeError):
+        return None, None
 
 
 # --------------------------------------------------------------------------- #
@@ -198,8 +221,16 @@ def _final_url(cache_key: str) -> str:
     return f"/api/forecast/{cache_key}/final"
 
 
+def _czml_url(cache_key: str) -> str:
+    return f"/api/forecast/{cache_key}/czml"
+
+
 def _load_cached_stats(cache_dir: Path, req: ForecastRequest, cache_key: str) -> ForecastResponse:
     stats_raw = json.loads((cache_dir / "stats.json").read_text())
+    # Backfill new fields for older cached stats files.
+    stats_raw.setdefault("has_czml", (cache_dir / "run.czml").exists())
+    stats_raw.setdefault("time_start", None)
+    stats_raw.setdefault("time_end", None)
     stats = ForecastStats(**stats_raw)
     return ForecastResponse(
         cache_key=cache_key,
@@ -208,6 +239,7 @@ def _load_cached_stats(cache_dir: Path, req: ForecastRequest, cache_key: str) ->
         params=req,
         paths_url=_paths_url(cache_key),
         final_url=_final_url(cache_key),
+        czml_url=_czml_url(cache_key) if stats.has_czml else None,
     )
 
 
@@ -220,6 +252,7 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
     cache_dir = FORECAST_CACHE / cache_key
     paths_path = cache_dir / "paths.geojson"
     final_path = cache_dir / "final.geojson"
+    czml_path = cache_dir / "run.czml"
     stats_path = cache_dir / "stats.json"
 
     if paths_path.exists() and final_path.exists() and stats_path.exists():
@@ -243,25 +276,30 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
                 horizontal_diffusivity=req.horizontal_diffusivity,
                 debris_classes=tuple(req.debris_classes),
                 min_prob=req.min_prob,
+                wind_speed_ms=req.wind_speed_ms,
+                wind_dir_deg=req.wind_dir_deg,
+                wind_drift_factor=req.wind_drift_factor,
             )
         except RuntimeError as e:
-            # e.g. no seeds matched the class filter
             raise HTTPException(status_code=422, detail=str(e)) from e
-        except Exception as e:  # noqa: BLE001 - surface drift errors to client
+        except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"drift failed: {e}") from e
     elapsed = time.perf_counter() - t0
 
-    # run_drift writes `<stem>.paths.geojson` / `<stem>.final.geojson`; rename
-    # to canonical names so the static URL paths are stable.
+    # run_drift writes `<stem>.paths.geojson`, `<stem>.final.geojson`, `<stem>.czml`;
+    # rename to canonical names so the static URL paths are stable.
     src_paths = out_stem.with_suffix(".paths.geojson")
     src_final = out_stem.with_suffix(".final.geojson")
     if src_paths.exists():
         src_paths.replace(paths_path)
     if src_final.exists():
         src_final.replace(final_path)
+    # CZML is already at run.czml (out_stem.with_suffix('.czml')); no rename needed.
 
     n_paths = _count_features(paths_path)
     n_final = _count_features(final_path)
+    has_czml = czml_path.exists()
+    t_start, t_end = _czml_time_window(czml_path) if has_czml else (None, None)
 
     stats = ForecastStats(
         cache_key=cache_key,
@@ -270,6 +308,9 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
         n_features_paths=n_paths,
         n_features_final=n_final,
         elapsed_s=round(elapsed, 2),
+        has_czml=has_czml,
+        time_start=t_start,
+        time_end=t_end,
     )
     stats_path.write_text(stats.model_dump_json(indent=2))
 
@@ -280,6 +321,7 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
         params=req,
         paths_url=_paths_url(cache_key),
         final_url=_final_url(cache_key),
+        czml_url=_czml_url(cache_key) if has_czml else None,
     )
 
 
@@ -290,12 +332,15 @@ def get_forecast_stats(cache_key: str) -> JSONResponse:
     params_path = cache_dir / "params.json"
     if not stats_path.exists() or not params_path.exists():
         raise HTTPException(404, f"forecast '{cache_key}' not found")
+    stats = json.loads(stats_path.read_text())
+    has_czml = bool(stats.get("has_czml")) or (cache_dir / "run.czml").exists()
     return JSONResponse({
         "cache_key": cache_key,
-        "stats": json.loads(stats_path.read_text()),
+        "stats": stats,
         "params": json.loads(params_path.read_text()),
         "paths_url": _paths_url(cache_key),
         "final_url": _final_url(cache_key),
+        "czml_url": _czml_url(cache_key) if has_czml else None,
     })
 
 
@@ -315,9 +360,14 @@ def get_forecast_final(cache_key: str) -> FileResponse:
     return FileResponse(path, media_type="application/geo+json")
 
 
-# --------------------------------------------------------------------------- #
-# Diagnostics: list cached forecasts                                          #
-# --------------------------------------------------------------------------- #
+@app.get("/api/forecast/{cache_key}/czml")
+def get_forecast_czml(cache_key: str) -> FileResponse:
+    path = FORECAST_CACHE / cache_key / "run.czml"
+    if not path.exists():
+        raise HTTPException(404, f"czml for forecast '{cache_key}' not found")
+    return FileResponse(path, media_type="application/json")
+
+
 @app.get("/api/forecast")
 def list_cached_forecasts() -> JSONResponse:
     out: list[dict] = []
@@ -344,7 +394,6 @@ if WEB_APP_DIR.is_dir():
 
 
 def _maybe_run_as_script() -> None:
-    # Convenience: `python -m src.api.server` boots uvicorn on :8000.
     import uvicorn
     uvicorn.run("src.api.server:app", host="0.0.0.0", port=8000, reload=False)
 
