@@ -11,6 +11,8 @@ __pycache__/
 
 # data + checkpoints
 data/raw/
+!data/raw/MARIDA/norm_stats.json
+!data/raw/MARIDA/class_weights.json
 checkpoints/
 *.pt
 *.pth
@@ -22,3 +24,4 @@ checkpoints/
 .idea/
 .vscode/
 .DS_Store
+CLAUDE.md
