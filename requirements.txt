@@ -16,3 +16,6 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 tqdm>=4.65.0
 opendrift>=1.14.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.5.0

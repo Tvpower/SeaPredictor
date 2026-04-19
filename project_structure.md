@@ -1,271 +1,158 @@
-***
+# Project Structure
 
-## Repo Structure
+Actual on-disk layout as of the current build. Each path below is a real file or directory in the repo.
 
 ```
 SeaPredictor/
 │
-├── README.md
-├── requirements.txt
-├── .env.example                  # HD_API_KEY, data paths
+├── README.md                            # entry point + quick start
+├── garbage_patch_predictor_overview.md  # product pitch, shipped vs planned
+├── Updated_process.md                   # end-to-end technical walkthrough
+├── project_structure.md                 # this file
 │
-├── data/
-│   ├── download_marida.sh        # pulls MARIDA from Zenodo
-│   ├── download_mados.sh         # pulls MADOS from Zenodo
-│   ├── download_oscar.py         # pulls NOAA OSCAR NetCDF by bbox/year
-│   ├── download_hycom.py         # pulls NOAA HYCOM SST/salinity
-│   └── raw/                      # gitignored, local data lives here
-│       ├── marida/
-│       ├── mados/
-│       ├── oscar/
-│       └── hycom/
+├── requirements.txt                     # torch, opendrift, fastapi, cesium clients, ...
+├── .env.example                         # (unused currently)
+├── .gitignore                           # excludes checkpoints/, data/raw/, web/scenes/, ...
 │
-├── src/
-│   ├── dataset/
-│   │   ├── __init__.py
-│   │   ├── marida_loader.py      # reads MARIDA GeoTIFFs + masks
-│   │   ├── mados_loader.py       # reads MADOS tiles + masks
-│   │   ├── oscar_loader.py       # reads OSCAR NetCDF → 30-day sequences
-│   │   ├── hycom_loader.py       # reads HYCOM NetCDF → SST/salinity
-│   │   └── debris_dataset.py     # master Dataset class, merges all sources
-│   │
-│   ├── models/
-│   │   ├── __init__.py
-│   │   ├── cnn_encoder.py        # ResNet-18 spatial encoder
-│   │   ├── lstm_encoder.py       # 2-layer LSTM temporal encoder
-│   │   └── fusion_model.py       # combines both → heatmap output
-│   │
-│   ├── training/
-│   │   ├── train.py              # main training loop
-│   │   ├── evaluate.py           # validation + metrics
-│   │   └── config.py             # hyperparams, paths, device setup
-│   │
-│   └── utils/
-│       ├── fdi.py                # FDI computation from B4/B8/B11
-│       ├── geo_utils.py          # lat/lon helpers, bbox cropping
-│       └── export.py             # TorchScript export for C++ inference
+├── checkpoints/                         # gitignored — trained model artifacts
+│   ├── cnn_only_v2/
+│   │   ├── best.pt                      # best-F1 checkpoint
+│   │   ├── thresholds.json              # per-class tuned decision thresholds
+│   │   └── test_report.json             # locked test-set metrics
+│   └── fused/                           # legacy CNN+LSTM (regressed, not used)
 │
-├── notebooks/
-│   ├── 01_explore_marida.ipynb   # sanity check MARIDA tiles
-│   ├── 02_explore_oscar.ipynb    # visualize current vectors
-│   └── 03_baseline_cnn.ipynb     # train CNN-only baseline interactively
+├── data/                                # gitignored except for norm_stats.json + class_weights.json
+│   ├── data/raw/MARIDA/
+│   │   ├── patches/<scene>/*.tif        # 11-band Sentinel-2 + _cl.tif + _conf.tif
+│   │   ├── splits/{train,val,test}_X.txt
+│   │   ├── tile_index.csv               # tile_id -> (date, lat, lon, scene, path)
+│   │   ├── labels_mapping.txt           # tile -> 15-elem multi-label vector
+│   │   ├── norm_stats.json              # per-band mean/std (11 bands + 8 derived indices)
+│   │   └── class_weights.json           # for the 11-class collapsed scheme (unused)
+│   ├── data/raw/oscar/*.nc              # 231 daily OSCAR NetCDFs (2020-02-06..2021-01-23)
+│   ├── forecast/                        # cached concat OSCAR files (auto-populated)
+│   ├── download_oscar.py                # OSCAR grabber (NASA Earthdata)
+│   └── test.py                          # MARIDA tile_index.csv generator
 │
-├── inference/                    # C++ LibTorch server (later)
-│   ├── CMakeLists.txt
-│   └── inference_server.cpp
+├── predictions/                         # gitignored — ad-hoc detector outputs
+│   └── honduras_sep18.json              # etc.
 │
-└── agent/                        # Human Delta integration (later)
-    ├── index_sources.py          # one-time corpus indexing
-    ├── enrich_prediction.py      # /v1/search at inference time
-    └── output_schema.py          # JSON schema for frontend
+├── forecast/                            # gitignored — ad-hoc forecast outputs
+│   ├── honduras_sep18.nc                # OpenDrift trajectory NetCDF
+│   ├── honduras_sep18.paths.geojson     # per-particle LineStrings
+│   ├── honduras_sep18.final.geojson     # final-position Points
+│   └── honduras_sep18.validation.json   # Tier 1 + Tier 2 metrics
+│
+├── web/                                 # gitignored — demo artifacts + frontend
+│   ├── app/
+│   │   └── index.html                   # CesiumJS 3D globe UI (single file, no build step)
+│   ├── scenes/                          # built by src.pipeline.build_scenes
+│   │   ├── index.json                   # scene manifest (served at /api/scenes)
+│   │   └── <scene_id>/
+│   │       ├── predictions.json         # raw detector output
+│   │       ├── detections.geojson       # map-ready polygons
+│   │       └── meta.json                # centroid, bbox, date, counts
+│   └── forecast_cache/                  # populated by POST /api/forecast
+│       └── <hash16>/
+│           ├── run.nc                   # OpenDrift trajectory NetCDF
+│           ├── paths.geojson
+│           ├── final.geojson
+│           ├── params.json              # echo of the request body
+│           └── stats.json               # n_particles, elapsed_s, ...
+│
+└── src/
+    │
+    ├── dataset/
+    │   ├── marida_loader.py             # MaridaIndex, TileRecord, default_marida_root
+    │   ├── marida_dataset.py            # raw MARIDA per-tile Dataset (returns masks too)
+    │   ├── debris_dataset.py            # master multi-label Dataset (image, seq, label)
+    │   ├── oscar_loader.py              # OSCARLoader — daily files, 0..360 lon fix, julian cal
+    │   ├── normalization.py             # normalize_bands()
+    │   ├── spectral_indices.py          # FDI / NDVI / NDWI stack (unused in production model)
+    │   └── augmentation.py              # flip/rotate for mask-aware segmentation training
+    │
+    ├── models/
+    │   ├── cnn_encoder.py               # ResNet-18 with 11-band first-conv adapter
+    │   ├── lstm_encoder.py              # 2-layer LSTM (present but unused in production)
+    │   └── fusion_model.py              # DebrisPredictor: CNN [+ LSTM] -> 15 multi-label head
+    │
+    ├── training/
+    │   ├── config.py                    # TrainConfig dataclass (dropout, weight_decay, ...)
+    │   ├── train.py                     # main loop + early stopping + auto pos_weight
+    │   ├── evaluate.py                  # val-loop with MPS-safe label handling
+    │   ├── tune_thresholds.py           # per-class F1-max threshold sweep on val
+    │   └── eval_test.py                 # final test-set evaluation with tuned thresholds
+    │
+    ├── inference/
+    │   ├── predict.py                   # run detector on a tile dir or full scene
+    │   └── export.py                    # TorchScript jit.trace + sanity-check + .meta.json
+    │
+    ├── forecast/
+    │   ├── seed.py                      # predictions.json -> list[Seed(lat, lon, date, ...)]
+    │   ├── oscar_concat.py              # build CF-compliant concat NetCDF for OpenDrift
+    │   ├── drift.py                     # OpenDrift orchestrator, writes .nc + 2 GeoJSONs
+    │   └── validate.py                  # Tier 1 plausibility + Tier 2 cross-detection hit rate
+    │
+    ├── pipeline/
+    │   └── build_scenes.py              # offline cache builder consumed by the web backend
+    │
+    ├── api/
+    │   └── server.py                    # FastAPI app: /api/scenes, /api/forecast, + static mount
+    │
+    └── utils/
+        ├── export.py                    # (duplicate of src/inference/export.py; pre-refactor)
+        └── preview_tile.py              # RGB + FDI + GT mask side-by-side viz
 ```
 
-***
+---
 
-## Phase 1 — Data Pipeline (Start Here)
+## Module responsibilities at a glance
 
-### Step 1: Download Scripts
+| Package | Responsibility | Dependencies |
+|---|---|---|
+| `src.dataset` | Read MARIDA tiles + OSCAR sequences off disk, normalize, split | rasterio, xarray |
+| `src.models` | Network definitions (CNN, optional LSTM, fused head) | torch, torchvision |
+| `src.training` | Training loop, metrics, threshold tuning, test eval | torchmetrics |
+| `src.inference` | Run a trained checkpoint on new tiles; export TorchScript | torch |
+| `src.forecast` | Turn predictions into drift seeds, simulate, validate | opendrift, pyproj |
+| `src.pipeline` | Offline batch processing that produces the web scene cache | — (composes the above) |
+| `src.api` | FastAPI backend + static frontend mount | fastapi, uvicorn, pydantic |
+| `web/app` | CesiumJS single-page demo UI (no build step) | — (CDN only) |
 
-**`data/download_marida.sh`**
-```bash
-#!/bin/bash
-# MARIDA from Zenodo — record 5151941
-mkdir -p data/raw/marida
-wget -O data/raw/marida/marida.zip \
-  "https://zenodo.org/record/5151941/files/MARIDA.zip"
-unzip data/raw/marida/marida.zip -d data/raw/marida/
-```
+---
 
-**`data/download_oscar.py`**
-```python
-# NOAA OSCAR — download 2018-2020 for North Pacific gyre region
-# bbox: lat 20-45N, lon 130-180W
-import requests, os
-
-BASE = "https://opendap.earthdata.nasa.gov/providers/POCLOUD/collections"
-YEARS = [2018, 2019, 2020]
-BBOX = {"lat_min": 20, "lat_max": 45, "lon_min": -180, "lon_max": -130}
-# Use NASA Earthdata credentials (free account required)
-```
-
-### Step 2: Master Dataset Class
-
-The core of everything — `src/dataset/debris_dataset.py` pairs MARIDA/MADOS tiles with their OSCAR temporal sequences by (lat, lon, date): [docs.pytorch](https://docs.pytorch.org/tutorials/beginner/basics/data_tutorial.html)
-
-```python
-class DebrisDataset(Dataset):
-    def __init__(self, split="train", use_hycom=False):
-        # Load all tile metadata from MARIDA + MADOS
-        marida_tiles = load_marida_index("data/raw/marida")
-        mados_tiles  = load_mados_index("data/raw/mados")
-        all_tiles = marida_tiles + mados_tiles
-
-        # Split: 70% train, 15% val, 15% test (by scene, not tile)
-        # Split by SCENE not by tile to avoid spatial leakage
-        self.tiles = split_by_scene(all_tiles, split)
-        self.oscar = OSCARLoader("data/raw/oscar")
-        self.use_hycom = use_hycom
-        if use_hycom:
-            self.hycom = HYCOMLoader("data/raw/hycom")
-
-    def __getitem__(self, idx):
-        tile = self.tiles[idx]
-
-        # CNN input: bands B4, B8, B11 → (3, 256, 256)
-        image = load_sentinel_bands(tile.path, bands=[3, 7, 10])
-        image = normalize_sentinel(image)
-
-        # LSTM input: 30-day current sequence → (30, 4) or (30, 6)
-        seq = self.oscar.get_sequence(tile.lat, tile.lon, tile.date, window=30)
-        if self.use_hycom:
-            sst_sal = self.hycom.get_sequence(tile.lat, tile.lon, tile.date)
-            seq = np.concatenate([seq, sst_sal], axis=-1)  # (30, 6)
-
-        # Label: binary debris mask → (1, 256, 256)
-        mask = load_debris_mask(tile.mask_path)
-
-        return (
-            torch.tensor(image, dtype=torch.float32),
-            torch.tensor(seq,   dtype=torch.float32),
-            torch.tensor(mask,  dtype=torch.float32)
-        )
-```
-
-> **Critical**: split by **scene** not by individual tile — tiles from the same scene share spatial context and will leak into validation if you split randomly. [github](https://github.com/marine-debris/marine-debris.github.io)
-
-***
-
-## Phase 2 — Model
-
-### CNN Encoder (`src/models/cnn_encoder.py`)
-```python
-import torchvision.models as models
-
-class CNNEncoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        resnet = models.resnet18(weights="IMAGENET1K_V1")
-        # Replace first conv: 3 bands input (B4, B8, B11)
-        resnet.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        # Remove final FC layer, keep feature extractor
-        self.encoder = nn.Sequential(*list(resnet.children())[:-1])  # → (512,)
-
-    def forward(self, x):
-        return self.encoder(x).squeeze(-1).squeeze(-1)  # (B, 512)
-```
-
-### LSTM Encoder (`src/models/lstm_encoder.py`)
-```python
-class LSTMEncoder(nn.Module):
-    def __init__(self, input_size=4, hidden=128, layers=2):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden, layers, batch_first=True, dropout=0.2)
-
-    def forward(self, x):  # x: (B, 30, 4)
-        _, (h_n, _) = self.lstm(x)
-        return h_n[-1]  # (B, 128) — last layer hidden state
-```
-
-### Fusion Model (`src/models/fusion_model.py`)
-```python
-class DebrisPredictor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.cnn  = CNNEncoder()   # → 512d
-        self.lstm = LSTMEncoder()  # → 128d
-        self.head = nn.Sequential(
-            nn.Linear(640, 256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 1),
-            nn.Sigmoid()           # probability per zone
-        )
-
-    def forward(self, image, currents):
-        spatial  = self.cnn(image)
-        temporal = self.lstm(currents)
-        fused    = torch.cat([spatial, temporal], dim=1)  # (B, 640)
-        return self.head(fused)
-```
-
-***
-
-## Phase 3 — Training Loop
-
-**`src/training/train.py`** key elements:
-
-```python
-# config
-BATCH_SIZE  = 16
-EPOCHS      = 30
-LR          = 1e-4
-DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
-
-# loss — weighted BCE because debris pixels are rare (class imbalance)
-pos_weight  = torch.tensor([10.0]).to(DEVICE)  # debris : non-debris ≈ 1:10
-criterion   = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-optimizer   = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=1e-4)
-scheduler   = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-
-# metrics
-from torchmetrics import F1Score, JaccardIndex  # IoU
-```
-
-> **Key detail**: use `BCEWithLogitsLoss` with `pos_weight` — debris pixels are heavily outnumbered by ocean pixels in each tile (~1:10 ratio), so without reweighting the model learns to predict "no debris everywhere" and still gets 90% accuracy. [geeksforgeeks](https://www.geeksforgeeks.org/deep-learning/resnet18-from-scratch-using-pytorch/)
-
-***
-
-## Phase 4 — Export for C++ Inference
-
-After training, one script handles the handoff to your LibTorch server:
-
-```python
-# src/utils/export.py
-model.eval()
-scripted = torch.jit.script(model)
-scripted.save("inference/debris_predictor.pt")
-print("Exported to inference/debris_predictor.pt")
-```
-
-***
-
-## `requirements.txt`
+## Data-flow recap
 
 ```
-torch>=2.2.0
-torchvision>=0.17.0
-torchmetrics>=1.0.0
-numpy>=1.24.0
-pandas>=2.0.0
-xarray>=2023.1.0
-netCDF4>=1.6.0
-rasterio>=1.3.0
-shapely>=2.0.0
-scikit-learn>=1.3.0
-matplotlib>=3.7.0
-folium>=0.14.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-tqdm>=4.65.0
+MARIDA .tif  ─► src.inference.predict ─► predictions.json
+                                               │
+                                               ▼
+                                  src.forecast.seed (filter + reproject)
+                                               │
+OSCAR .nc ─► src.forecast.oscar_concat ───────►│ src.forecast.drift
+                                               │     (OpenDrift integration)
+                                               ▼
+                              paths.geojson · final.geojson · run.nc
+                                               │
+                    Scene B predictions ──────►│ src.forecast.validate
+                                               ▼
+                                     tier1_*.json · tier2_*.json
 ```
 
-***
+The same chain runs twice in different orchestration harnesses:
 
-## Git Init Checklist
+- **CLI scripts** (for one-off analysis): `predict.py` → `drift.py` → `validate.py`.
+- **Web pipeline**: `src.pipeline.build_scenes` pre-caches all detections offline; `src.api.server` runs OpenDrift on demand per user request and caches by parameter hash.
 
-```bash
-git init garbage-patch-predictor
-cd garbage-patch-predictor
-touch README.md requirements.txt .env.example .gitignore
+---
 
-# .gitignore essentials
-echo "data/raw/" >> .gitignore
-echo ".env" >> .gitignore
-echo "__pycache__/" >> .gitignore
-echo "*.pt" >> .gitignore       # model weights stay local
-echo "*.nc" >> .gitignore       # NetCDF files are large
+## Gitignored outputs
 
-mkdir -p data src/dataset src/models src/training src/utils notebooks inference agent
-```
+Everything listed under `forecast/`, `predictions/`, `web/scenes/`, `web/forecast_cache/`, `data/raw/`, `data/data/`, `data/forecast/`, and `checkpoints/` is gitignored. These are generated artifacts — reproducible from the MARIDA raw data + OSCAR files + a trained checkpoint.
 
-The build order is: **download scripts → `debris_dataset.py` → CNN baseline → add LSTM → export**. Every phase is independently testable — you can run the CNN alone before the LSTM exists, and the dataset class works before the model exists. [jordanbell](https://jordanbell.info/blog/2022/12/15/sea-surface-currents-OSCAR.html)
+What IS committed:
+
+- Source code under `src/`
+- Frontend single-file under `web/app/index.html`
+- `data/data/raw/MARIDA/norm_stats.json` and `class_weights.json` (tiny, dataset-specific)
+- `requirements.txt`, `.gitignore`, docs

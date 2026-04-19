@@ -1,0 +1,16 @@
+{
+  "input_image_shape": [
+    1,
+    11,
+    256,
+    256
+  ],
+  "input_seq_shape": [
+    1,
+    30,
+    4
+  ],
+  "num_classes": 15,
+  "use_temporal": false,
+  "source_ckpt": "checkpoints/cnn_only_v2/best.pt"
+}

@@ -1,84 +1,191 @@
-# SeaPredictor (OceanWatch)
+# SeaPredictor
 
-Hybrid CNN + LSTM model that fuses Sentinel-2 imagery with NOAA OSCAR/HYCOM ocean
-physics to predict marine debris accumulation zones. See
-`garbage_patch_predictor_overview.md` for the full project overview.
+**Detect marine debris in Sentinel-2 satellite imagery and forecast where it will drift, end-to-end.**
+
+SeaPredictor is a two-stage system built for the FullyHacks hackathon:
+
+1. **Detection** — a ResNet-18 classifier trained on MARIDA tells you which 256×256 m ocean tiles contain debris (and what class: plastic, sargassum, foam, etc.).
+2. **Forecasting** — OpenDrift takes those detections and propagates particles forward through NOAA OSCAR ocean currents to show where the debris is likely to go over the next 1–30 days.
+
+A web app wraps it in a 3D globe (CesiumJS) with a scene picker and an on-demand forecast form. Forecast runs are cached by parameter hash so repeat demos are instant.
+
+---
 
 ## Quick start
+
+### 1. Install
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
-
-# Smoke-test the training loop with synthetic data (no downloads needed)
-python -m src.training.train --synthetic --epochs 2 --batch-size 4
 ```
 
-### Training on Apple Silicon (MPS / Metal)
+### 2. Data layout (already on disk if you've been using this repo)
 
-The training stack auto-detects MPS on Apple Silicon Macs — no flags required.
-What's wired up for you:
+```
+data/data/raw/MARIDA/patches/<scene>/*.tif     # Sentinel-2 patches + masks
+data/data/raw/MARIDA/splits/{train,val,test}_X.txt
+data/data/raw/MARIDA/tile_index.csv            # maps tile -> date, lat, lon
+data/data/raw/MARIDA/norm_stats.json           # per-band mean/std
+data/data/raw/oscar/oscar_currents_interim_YYYYMMDD.nc   # 231 daily files
+```
+
+OSCAR coverage window: **2020-02-06 → 2021-01-23** (231 days). MARIDA scenes outside this window can be detected but not forecasted until more OSCAR data is downloaded.
+
+### 3. Train (already done — you can skip if you have a checkpoint)
+
+```bash
+# CNN-only (the production config — OSCAR-as-feature regressed, see notes).
+python -m src.training.train --cnn-only \
+  --epochs 25 --batch-size 16 \
+  --head-dropout 0.5 --weight-decay 0.01 --early-stopping-patience 6 \
+  --ckpt-dir checkpoints/cnn_only_v2
+
+# Per-class threshold tuning on the val split (+4 macro-F1 points).
+python -m src.training.tune_thresholds --ckpt checkpoints/cnn_only_v2/best.pt
+
+# Lock in numbers on the held-out test split.
+python -m src.training.eval_test \
+  --ckpt checkpoints/cnn_only_v2/best.pt \
+  --thresholds checkpoints/cnn_only_v2/thresholds.json \
+  --report checkpoints/cnn_only_v2/test_report.json
+```
+
+Test-set macro-F1 with tuned thresholds: **0.60** (Marine Debris alone: F1=0.85).
+
+### 4. Build the scene cache (one-time, ~5–15 min on CPU)
+
+```bash
+python -m src.pipeline.build_scenes \
+  --ckpt checkpoints/cnn_only_v2/best.pt \
+  --thresholds checkpoints/cnn_only_v2/thresholds.json \
+  --out web/scenes
+```
+
+This runs the detector on every MARIDA scene that falls inside the OSCAR window and writes a web-friendly cache:
+
+```
+web/scenes/
+  index.json                           # manifest (centroid, date, count per scene)
+  <scene_id>/
+    predictions.json                   # raw detector output
+    detections.geojson                 # map-ready polygons (WGS84)
+    meta.json                          # summary stats
+```
+
+### 5. Boot the API + frontend
+
+```bash
+uvicorn src.api.server:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000` → 3D globe loads with red markers at every scene hotspot. Click a marker, tweak the forecast params, hit **Run Forecast**. First run takes 20–60 s (OpenDrift); second run of the same params is instant (cache hit).
+
+---
+
+## Architecture snapshot
+
+```
+┌──────────────────────────┐        ┌──────────────────────────┐
+│  STAGE 1: DETECTION       │        │  STAGE 2: FORECAST        │
+│  "What's in this image?"  │  ───►  │  "Where will it drift?"   │
+│                           │        │                           │
+│  ResNet-18 CNN            │        │  OpenDrift OceanDrift     │
+│  (MARIDA-trained, 15 cls) │        │  (Lagrangian physics      │
+│                           │        │   on OSCAR u/v fields)    │
+└──────────────────────────┘        └──────────────────────────┘
+         ▲                                       ▲
+  Sentinel-2 11-band tiles               NOAA OSCAR daily NetCDFs
+  (via src.inference.predict)            (via src.forecast.oscar_concat)
+                  │                                   │
+                  └──── predictions.json ─────┐       │
+                                              ▼       ▼
+                            ┌──────────────────────────────┐
+                            │  src.forecast.seed           │
+                            │  filter + reproject + dates  │
+                            └──────────────────────────────┘
+                                          │
+                                          ▼
+                            ┌──────────────────────────────┐
+                            │  src.forecast.drift          │
+                            │  Monte Carlo particle sim    │
+                            └──────────────────────────────┘
+                                          │
+                                          ▼
+                   paths.geojson · final.geojson · trajectory.nc
+```
+
+Two things to internalize:
+
+- **Detection is pure ML, forecasting is pure physics.** They communicate through one JSON file.
+- **OSCAR is only used by the forecaster.** The CNN doesn't read currents (the original LSTM branch regressed during training, so `--cnn-only` is the production config).
+
+See `Updated_process.md` for a step-by-step walkthrough with data-flow diagrams and `garbage_patch_predictor_overview.md` for the pitch.
+
+---
+
+## What ships vs. what was originally planned
+
+| Component | Original plan | Status |
+|---|---|---|
+| ResNet-18 CNN detector | ✅ | Shipped |
+| Per-class threshold tuning | Added late | Shipped |
+| Test-set evaluation + report | Added late | Shipped |
+| TorchScript export | ✅ | Shipped (unused; Python inference is fast enough) |
+| OpenDrift forecasting | Phase 2 | Shipped |
+| Tier 1 + Tier 2 validation | Added late | Shipped |
+| Scene pre-cache pipeline | Not in plan | Shipped |
+| FastAPI backend | Not in plan | Shipped |
+| CesiumJS 3D globe UI | Not in plan | Shipped |
+| CNN + LSTM fusion (OSCAR as feature) | ✅ | Implemented, **regressed F1 → deprecated** |
+| HYCOM SST/salinity | Phase 2 | Deferred |
+| 15 → 11 class collapse | Planned | Deferred |
+| C++ LibTorch server | Phase 4 | Deferred (Python is fine) |
+| Human Delta enrichment | Phase 5 | Deferred |
+| MADOS / NASA-IMPACT datasets | Planned | Not integrated |
+| U-Net per-pixel segmentation | Discussed | Skipped for MVP |
+| Time-animated drift playback | Nice-to-have | Deferred (paths are static LineStrings) |
+
+---
+
+## Training on Apple Silicon (MPS / Metal)
+
+Auto-detected — no flags needed. The training stack was hardened for MPS:
 
 - `default_device()` returns `"mps"` when available.
-- `num_workers` defaults to `0` on MPS (PyTorch DataLoader workers fork badly on
-  macOS and routinely crash the run).
-- `pin_memory` is disabled on MPS (only useful for CUDA's pinned host transfers).
-- `PYTORCH_ENABLE_MPS_FALLBACK=1` is set automatically so any op Metal hasn't
-  implemented yet falls back to CPU instead of erroring.
-- Metrics (torchmetrics) are computed on CPU, since Metal coverage there is uneven.
-- `torch.mps.manual_seed` is called alongside `torch.manual_seed` for reproducibility.
+- `num_workers=0` on MPS (forking DataLoader workers crashes macOS).
+- `pin_memory` disabled on MPS (CUDA-only).
+- `PYTORCH_ENABLE_MPS_FALLBACK=1` set so unimplemented ops fall back to CPU.
+- `non_blocking=True` removed from tensor transfers — it's a no-op on MPS and causes a known race with `torch.int32` casts that produces garbage label values.
+- Labels are kept on CPU for metrics; only the model-forward copy goes to MPS.
 
-```bash
-# Smoke test on MPS (auto-detected)
-python -m src.training.train --synthetic --epochs 2 --batch-size 8
+Keep batch size modest (16 on M1/M2 8 GB, 16–32 on 16 GB+).
 
-# Force CPU if you need to debug
-python -m src.training.train --synthetic --device cpu
+---
 
-# Real training on M-series with full pretrained ResNet-18
-python -m src.training.train --epochs 30 --batch-size 16
-```
+## Entry points cheat sheet
 
-Notes:
+| Command | What it does |
+|---|---|
+| `python -m src.training.train --cnn-only ...` | Train the detector |
+| `python -m src.training.tune_thresholds --ckpt ...` | Per-class F1-max thresholds |
+| `python -m src.training.eval_test --ckpt ... --thresholds ...` | Locked-in test metrics |
+| `python -m src.inference.predict --ckpt ... --tiles <dir>` | Detect on a single scene or tile dir |
+| `python -m src.inference.export --ckpt ...` | Export TorchScript `.ts.pt` |
+| `python -m src.forecast.drift --predictions ... --days N` | Run OpenDrift forecast |
+| `python -m src.forecast.validate --traj ... [--scene-b ...]` | Tier 1 + Tier 2 validation |
+| `python -m src.pipeline.build_scenes --ckpt ... --out web/scenes` | Build the web cache |
+| `uvicorn src.api.server:app` | Boot the demo backend + frontend |
 
-- Keep batch size modest (8–16 on M1/M2 8 GB, 16–32 on 16 GB+). Activations for
-  256×256 ResNet-18 + a 30-step LSTM add up.
-- Mixed precision (`autocast`) on MPS is still flaky in PyTorch 2.x; the loop
-  runs in fp32. If you want to experiment, wrap the forward in
-  `torch.autocast(device_type="mps", dtype=torch.float16)` — expect occasional
-  numerical issues with `BCEWithLogitsLoss` + `pos_weight`.
-- First run downloads the pretrained ResNet-18 weights to `~/.cache/torch/hub`.
+---
 
-## Layout
+## Known limitations
 
-```
-src/
-  dataset/    # Per-source loaders + master DebrisDataset
-  models/     # CNN / LSTM / Fusion modules
-  training/   # config, train.py, evaluate.py
-  utils/      # FDI, geo helpers, TorchScript export
-data/         # Download scripts; raw/ is gitignored
-inference/    # C++ LibTorch server (later)
-agent/        # Human Delta integration (later)
-```
+1. **OSCAR window**: 2020-02-06 → 2021-01-23 only. 23 of MARIDA's 63 scenes are inside this window.
+2. **Currents-only forecast**: no wind / Stokes drift. Adds a systematic bias in windy regions.
+3. **Cloud false positives**: FDI lights up for thin clouds. Current model handles OK but it's the dominant failure mode.
+4. **Sub-pixel debris**: even our highest-scoring tiles have <0.1 % debris pixels — Sentinel-2 just doesn't resolve individual items.
+5. **OpenDrift isn't thread-safe**: the API serializes forecast runs behind a lock (fine for single-user demo).
+6. **First forecast is slow**: 20–60 s for typical params. Pre-warm the cache before demoing.
 
-## Build order
-
-1. Data download scripts (`data/download_*.{sh,py}`)
-2. Real loaders inside `src/dataset/` (currently stubbed; synthetic mode works today)
-3. Train CNN-only baseline → add LSTM → fusion
-4. Export to TorchScript via `src/utils/export.py`
-
-## Training entry points
-
-```bash
-# Full training (requires real data under data/raw/)
-python -m src.training.train --epochs 30 --batch-size 16
-
-# Eval a checkpoint
-python -m src.training.evaluate --ckpt checkpoints/best.pt
-
-# Export TorchScript
-python -m src.utils.export --ckpt checkpoints/best.pt --out inference/debris_predictor.pt
-```
+See `garbage_patch_predictor_overview.md` for fix paths.
