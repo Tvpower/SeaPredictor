@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SeaPredictor - Debris Drift Forecasting</title>
+
+<!-- Cesium (fixed version from jsDelivr, no Ion token required since we
+     override imagery + disable default providers) -->
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Widgets/widgets.css">
+
+<style>
+  :root {
+    --bg: #0a0e14;
+    --panel: rgba(20, 30, 45, 0.92);
+    --panel-hover: rgba(255,255,255,0.08);
+    --accent: #64c8ff;
+    --accent-warm: #ffa502;
+    --danger: #ff4757;
+    --muted: #7a8899;
+    --fg: #e0e6ed;
+    --border: #2a3a4d;
+  }
+  html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden;
+               font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+               background: var(--bg); color: var(--fg); }
+  #cesiumContainer { width: 100%; height: 100%; }
+
+  /* ---- Left control panel ---- */
+  #panel {
+    position: absolute; top: 12px; left: 12px;
+    width: 340px; max-height: calc(100vh - 24px); overflow-y: auto;
+    background: var(--panel); border-radius: 8px; padding: 16px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.45); z-index: 1000;
+    backdrop-filter: blur(10px);
+  }
+  #panel h1 { font-size: 16px; margin: 0 0 2px; font-weight: 700; letter-spacing: 0.01em; }
+  #panel .subtitle { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+  #panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+              color: var(--muted); margin: 18px 0 6px; font-weight: 600; }
+
+  /* ---- Scene list ---- */
+  .scene {
+    padding: 8px 10px; border-radius: 4px; cursor: pointer; margin-bottom: 4px;
+    background: rgba(255,255,255,0.04); border-left: 3px solid transparent;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .scene:hover { background: var(--panel-hover); }
+  .scene.active { background: rgba(100, 200, 255, 0.14); border-left-color: var(--accent); }
+  .scene .sid { font-size: 12px; font-weight: 600; color: var(--fg); font-family: ui-monospace, monospace; }
+  .scene .meta { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .scene .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                background: var(--danger); margin-right: 6px; vertical-align: middle; }
+
+  /* ---- Forecast form ---- */
+  label { display: block; font-size: 11px; color: var(--muted); margin-top: 10px; margin-bottom: 3px; }
+  input[type="number"] {
+    width: 100%; padding: 7px 8px; box-sizing: border-box;
+    background: #0d1720; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; font-size: 12px; font-family: ui-monospace, monospace;
+  }
+  input[type="number"]:focus { outline: none; border-color: var(--accent); }
+
+  .class-row { display: flex; align-items: center; font-size: 12px; padding: 3px 0; cursor: pointer; }
+  .class-row input { margin-right: 8px; }
+
+  button {
+    width: 100%; padding: 10px; border: none; border-radius: 4px;
+    font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 12px;
+    transition: background 0.12s;
+  }
+  button.primary { background: #2a7fe5; color: white; }
+  button.primary:hover:not(:disabled) { background: #3c91f0; }
+  button.primary:disabled { background: #3a4a5d; cursor: not-allowed; }
+  button.ghost { background: rgba(255,255,255,0.06); color: var(--fg); margin-top: 6px; }
+  button.ghost:hover { background: var(--panel-hover); }
+
+  .stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px;
+           font-size: 12px; margin-top: 10px; padding-top: 10px;
+           border-top: 1px solid var(--border); }
+  .stats .k { color: var(--muted); }
+  .stats .v { color: var(--fg); font-weight: 600; font-family: ui-monospace, monospace; }
+  .stats .v.cached { color: var(--accent); }
+
+  /* ---- Status banner ---- */
+  #status {
+    position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%);
+    max-width: 640px; min-width: 300px;
+    background: var(--panel); color: var(--fg);
+    padding: 10px 16px; border-radius: 6px; font-size: 12px;
+    z-index: 1000; display: none; backdrop-filter: blur(10px);
+    border-left: 3px solid var(--accent);
+  }
+  #status.err { border-left-color: var(--danger); }
+  #status.ok { border-left-color: #43c87b; }
+  #status.info { border-left-color: var(--accent); }
+
+  /* ---- Legend ---- */
+  #legend {
+    position: absolute; top: 12px; right: 12px;
+    background: var(--panel); padding: 10px 14px; border-radius: 6px;
+    font-size: 11px; z-index: 1000; backdrop-filter: blur(10px);
+  }
+  .legend-row { display: flex; align-items: center; margin: 3px 0; }
+  .legend-swatch { width: 14px; height: 4px; border-radius: 2px; margin-right: 8px; }
+  .legend-swatch.dot { height: 8px; width: 8px; border-radius: 50%; }
+
+  /* ---- Scrollbar ---- */
+  #panel::-webkit-scrollbar { width: 6px; }
+  #panel::-webkit-scrollbar-track { background: transparent; }
+  #panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ---- Loading ---- */
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; margin-right: 8px;
+    border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- Personalized SeaPredictor console skin ---- */
+  :root {
+    --bg: #020b16;
+    --panel: rgba(6, 26, 45, 0.84);
+    --panel-strong: rgba(4, 20, 38, 0.94);
+    --panel-hover: rgba(83, 234, 253, 0.1);
+    --accent: #53eafd;
+    --accent-warm: #ffb454;
+    --danger: #ff806f;
+    --muted: #91a8ba;
+    --fg: #f5fbff;
+    --border: rgba(180, 230, 255, 0.16);
+    --ok: #5ee9b5;
+  }
+
+  html, body {
+    background:
+      radial-gradient(circle at 58% 46%, rgba(83, 234, 253, 0.13), transparent 36%),
+      linear-gradient(135deg, #020b16 0%, #08243a 48%, #020b16 100%);
+    color: var(--fg);
+    font-family: Arial, Helvetica, sans-serif;
+  }
+
+  #cesiumContainer {
+    position: absolute;
+    inset: 0 0 0 288px;
+    width: auto;
+    height: 100%;
+  }
+
+  #topbar {
+    pointer-events: none;
+    position: absolute;
+    z-index: 1001;
+    top: 0;
+    left: 288px;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    padding: 24px 28px;
+  }
+
+  #topbar .eyebrow,
+  #panel h2,
+  #pipeline .stage {
+    margin: 0;
+    color: rgba(162, 244, 253, 0.72);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+  }
+
+  #topbar h2 {
+    margin: 6px 0 0;
+    color: #ffffff;
+    font-size: clamp(20px, 2vw, 28px);
+    line-height: 1.05;
+  }
+
+  #topbar .actions {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  #topbar input,
+  #topbar button,
+  input[type="number"] {
+    min-height: 38px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(7, 27, 45, 0.86);
+    color: #ffffff;
+    padding: 0 12px;
+    box-sizing: border-box;
+  }
+
+  #topbar input {
+    width: min(260px, 24vw);
+  }
+
+  #topbar input::placeholder {
+    color: #708697;
+  }
+
+  #topbar button {
+    width: auto;
+    margin: 0;
+    background: rgba(255, 255, 255, 0.08);
+    color: #dffbff;
+  }
+
+  #topbar button:hover {
+    background: rgba(83, 234, 253, 0.14);
+  }
+
+  #panel {
+    top: 0;
+    left: 0;
+    width: 288px;
+    height: 100vh;
+    max-height: none;
+    border-radius: 0;
+    border-right: 1px solid var(--border);
+    background: var(--panel-strong);
+    box-shadow: 24px 0 60px rgba(0, 0, 0, 0.28);
+    padding: 26px 22px;
+  }
+
+  #panel::before {
+    content: "SeaPredictor";
+    display: block;
+    margin-bottom: 10px;
+    color: rgba(162, 244, 253, 0.72);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+  }
+
+  #panel h1 {
+    margin: 0;
+    color: #ffffff;
+    font-size: clamp(28px, 2.2vw, 38px);
+    line-height: 1.02;
+    letter-spacing: 0;
+  }
+
+  #panel .subtitle {
+    margin: 10px 0 22px;
+    color: #b9cad7;
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  #scenes {
+    display: grid;
+    gap: 8px;
+  }
+
+  .scene {
+    margin: 0;
+    border: 1px solid transparent;
+    border-left: 3px solid transparent;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+    padding: 10px 12px;
+  }
+
+  .scene:hover,
+  .scene.active {
+    border-color: rgba(83, 234, 253, 0.24);
+    border-left-color: var(--accent);
+    background: rgba(83, 234, 253, 0.11);
+  }
+
+  .scene .sid {
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .scene .meta {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+
+  .scene .dot {
+    background: var(--danger);
+  }
+
+  #forecastForm {
+    margin-top: 20px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.035);
+    padding: 14px;
+  }
+
+  label {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  input[type="number"] {
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+  }
+
+  .class-row {
+    color: #d7e7f2;
+    font-size: 12px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .class-row input {
+    accent-color: var(--accent);
+  }
+
+  button.primary {
+    min-height: 40px;
+    background: var(--accent);
+    color: #03101f;
+    font-weight: 800;
+  }
+
+  button.primary:hover:not(:disabled) {
+    background: #a2f4fd;
+  }
+
+  button.ghost {
+    border: 1px solid var(--border);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  #legend {
+    top: 126px;
+    right: 28px;
+    width: 302px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+    box-shadow: 0 22px 48px rgba(0, 0, 0, 0.26);
+    padding: 18px;
+  }
+
+  #legend .legend-title {
+    margin-bottom: 14px;
+    color: #ffffff;
+    font-size: 18px;
+    font-weight: 800;
+  }
+
+  .legend-row {
+    gap: 12px;
+    margin: 12px 0;
+    color: #c7d7e2;
+    font-size: 13px;
+  }
+
+  .legend-swatch {
+    width: 32px;
+    height: 4px;
+    margin: 0;
+  }
+
+  .legend-swatch.dot {
+    width: 11px;
+    height: 11px;
+  }
+
+  #pipeline {
+    position: absolute;
+    z-index: 1000;
+    bottom: 28px;
+    left: 316px;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    width: min(700px, calc(100vw - 700px));
+  }
+
+  #pipeline article {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(6, 26, 45, 0.78);
+    box-shadow: 0 22px 48px rgba(0, 0, 0, 0.26);
+    backdrop-filter: blur(16px);
+    padding: 14px;
+  }
+
+  #pipeline h3 {
+    margin: 6px 0;
+    color: #ffffff;
+    font-size: 18px;
+    line-height: 1.05;
+  }
+
+  #pipeline p:last-child {
+    margin: 0;
+    color: #c7d7e2;
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
+  #status {
+    right: 28px;
+    bottom: 28px;
+    left: auto;
+    transform: none;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+  }
+
+  .stats {
+    border-top-color: var(--border);
+  }
+
+  .stats .v.cached {
+    color: var(--ok);
+  }
+
+  @media (max-width: 980px) {
+    html, body {
+      overflow: auto;
+    }
+
+    #cesiumContainer {
+      inset: 290px 0 0 0;
+      height: 900px;
+    }
+
+    #panel {
+      position: relative;
+      width: auto;
+      height: auto;
+      max-height: none;
+      border-right: 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    #topbar {
+      top: 290px;
+      left: 0;
+      flex-direction: column;
+      align-items: flex-start;
+      padding: 18px;
+    }
+
+    #topbar .actions {
+      flex-flow: row wrap;
+      width: 100%;
+    }
+
+    #topbar input,
+    #topbar button {
+      flex: 1 1 110px;
+      width: auto;
+    }
+
+    #legend,
+    #pipeline,
+    #status {
+      right: 18px;
+      left: 18px;
+      width: auto;
+    }
+
+    #legend {
+      top: 520px;
+    }
+
+    #pipeline {
+      top: 760px;
+      bottom: auto;
+      grid-template-columns: 1fr;
+    }
+
+    #status {
+      position: fixed;
+    }
+  }
+
+  /* ---- Clean integrated layout pass ---- */
+  .cesium-viewer-toolbar,
+  .cesium-viewer-animationContainer,
+  .cesium-viewer-timelineContainer,
+  .cesium-selection-wrapper {
+    display: none !important;
+  }
+
+  .cesium-viewer,
+  .cesium-widget,
+  .cesium-widget canvas {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  #cesiumContainer {
+    inset: 0 0 0 308px;
+    background: #020b16;
+  }
+
+  #panel {
+    width: 308px;
+    box-sizing: border-box;
+    padding: 30px 24px 24px;
+    overflow-x: hidden;
+  }
+
+  #panel h1 {
+    max-width: 240px;
+  }
+
+  #topbar {
+    left: 336px;
+    right: 30px;
+    top: 28px;
+    padding: 0;
+    align-items: flex-start;
+  }
+
+  #topbar h2 {
+    max-width: min(760px, calc(100vw - 760px));
+    font-size: clamp(24px, 2.2vw, 34px);
+    text-wrap: balance;
+  }
+
+  #topbar .actions {
+    margin-left: auto;
+  }
+
+  #topbar input {
+    width: 272px;
+  }
+
+  #forecastForm,
+  #legend {
+    position: absolute;
+    right: 30px;
+    width: 344px;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(6, 26, 45, 0.9);
+    box-shadow: 0 22px 48px rgba(0, 0, 0, 0.28);
+    backdrop-filter: blur(16px);
+  }
+
+  #forecastForm {
+    top: 132px;
+    z-index: 1000;
+    padding: 22px 18px 18px;
+  }
+
+  #forecastForm h2 {
+    margin: 0;
+    color: #ffffff;
+    font-size: 18px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .card-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+  }
+
+  #cacheBadge {
+    min-width: 56px;
+    border-radius: 6px;
+    background: rgba(94, 233, 181, 0.14);
+    color: var(--ok);
+    padding: 7px 10px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: 800;
+    text-transform: lowercase;
+  }
+
+  .readonly-field {
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(7, 27, 45, 0.86);
+    color: #ffffff;
+    padding: 0 12px;
+    box-sizing: border-box;
+    font-size: 13px;
+    font-weight: 800;
+  }
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  #forecastForm input[type="number"] {
+    min-width: 0;
+    height: 40px;
+  }
+
+  #classList {
+    display: grid;
+    gap: 5px;
+    max-height: 104px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  #advancedControls {
+    margin-top: 12px;
+  }
+
+  #advancedControls summary {
+    cursor: pointer;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    list-style-position: outside;
+  }
+
+  #advancedControls[open] {
+    padding-top: 4px;
+  }
+
+  #advancedControls[open] summary {
+    margin-bottom: 8px;
+  }
+
+  #forecastForm .primary,
+  #forecastForm .ghost {
+    width: 100%;
+  }
+
+  #legend {
+    top: 488px;
+    z-index: 999;
+    padding: 16px 18px;
+  }
+
+  #legend .legend-title {
+    margin-bottom: 10px;
+    font-size: 17px;
+  }
+
+  #legend .legend-row {
+    margin: 8px 0;
+    font-size: 12px;
+  }
+
+  #pipeline {
+    left: 336px;
+    bottom: 28px;
+    width: min(734px, calc(100vw - 746px));
+  }
+
+  #status {
+    right: 30px;
+    bottom: 30px;
+    width: 388px;
+    max-width: calc(100vw - 368px);
+  }
+
+  @media (max-width: 1220px) {
+    #pipeline {
+      grid-template-columns: 1fr;
+      width: 300px;
+    }
+
+    #pipeline article:nth-child(n+2) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 980px) {
+    #cesiumContainer {
+      inset: 300px 0 0 0;
+      height: 920px;
+    }
+
+    #topbar,
+    #forecastForm,
+    #legend,
+    #pipeline {
+      position: relative;
+      top: auto;
+      right: auto;
+      bottom: auto;
+      left: auto;
+      width: auto;
+      margin: 18px;
+    }
+
+    #topbar {
+      padding: 0;
+    }
+
+    #topbar h2 {
+      max-width: none;
+    }
+
+    #pipeline {
+      grid-template-columns: 1fr;
+    }
+
+    #pipeline article:nth-child(n+2) {
+      display: block;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div id="cesiumContainer"></div>
+
+<div id="topbar">
+  <div>
+    <p class="eyebrow">Stage 3 Web UI</p>
+    <h2 id="pageTitle">Honduras Sep 18 drift forecast</h2>
+  </div>
+  <div class="actions">
+    <input aria-label="Search scene or coordinates" placeholder="Scene or coordinates">
+    <button type="button">Export</button>
+    <button type="button">Share</button>
+  </div>
+</div>
+
+<div id="panel">
+  <h1>Debris Drift Console</h1>
+  <div class="subtitle">Marine debris detection &amp; drift forecasting</div>
+
+  <h2>Identified Scenes</h2>
+  <div id="scenes"><span class="spinner"></span>Loading scenes...</div>
+
+</div>
+
+<div id="forecastForm" style="display:none;">
+  <div class="card-title">
+    <h2>Forecast controls</h2>
+    <span id="cacheBadge">cached</span>
+  </div>
+  <label>Scene</label>
+  <div id="selectedSceneName" class="readonly-field">Select a scene</div>
+
+  <div class="field-grid">
+    <div>
+      <label>Days</label>
+      <input type="number" id="days" value="7" min="1" max="30" step="1">
+    </div>
+    <div>
+      <label>Particles</label>
+      <input type="number" id="nPerSeed" value="100" min="10" max="500" step="10">
+    </div>
+  </div>
+
+  <details id="advancedControls">
+    <summary>Advanced physics parameters</summary>
+    <div class="field-grid">
+      <div>
+        <label>Seed radius (m)</label>
+        <input type="number" id="seedRadius" value="1000" min="100" max="10000" step="100">
+      </div>
+      <div>
+        <label>Diffusivity</label>
+        <input type="number" id="diffusivity" value="10" min="0" max="500" step="1">
+      </div>
+    </div>
+
+    <label>Debris classes to track</label>
+    <div id="classList"></div>
+  </details>
+
+  <button id="runForecast" class="primary">Run forecast</button>
+  <button id="clearForecast" class="ghost">Clear layers</button>
+
+  <div class="stats" id="forecastStats" style="display:none;"></div>
+</div>
+
+<div id="legend">
+  <div class="legend-title">Layer legend</div>
+  <div class="legend-row"><span class="legend-swatch dot" style="background:#ff4757"></span>Scene hotspot (count = detections)</div>
+  <div class="legend-row"><span class="legend-swatch" style="background:#ff4757"></span>Debris-positive tile</div>
+  <div class="legend-row"><span class="legend-swatch" style="background:#50b4ff"></span>Particle path (drift)</div>
+  <div class="legend-row"><span class="legend-swatch dot" style="background:#ffa502"></span>Final position</div>
+</div>
+
+<div id="pipeline">
+  <article>
+    <p class="stage">Stage 1</p>
+    <h3>Detector</h3>
+    <p>ResNet-18 reads Sentinel-2 tiles and writes prediction JSON.</p>
+  </article>
+  <article>
+    <p class="stage">Stage 2</p>
+    <h3>Forecast</h3>
+    <p>OpenDrift evolves selected debris seed points through OSCAR currents.</p>
+  </article>
+  <article>
+    <p class="stage">Stage 3</p>
+    <h3>Explore</h3>
+    <p>FastAPI serves scene polygons, cached paths, and final particles.</p>
+  </article>
+</div>
+
+<div id="status"></div>
+
+<script>
+  // Must be set BEFORE loading Cesium so its workers / assets resolve.
+  window.CESIUM_BASE_URL = 'https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/';
+</script>
+<script src="https://cdn.jsdelivr.net/npm/cesium@1.120.0/Build/Cesium/Cesium.js"></script>
+<script>
+  'use strict';
+
+  // ------------------------------------------------------------------------ //
+  // Cesium viewer - OSM imagery, no Ion token, ellipsoid terrain             //
+  // ------------------------------------------------------------------------ //
+  const viewer = new Cesium.Viewer('cesiumContainer', {
+    // OpenStreetMap tiles (no token). Attribution is kept via the credit container.
+    imageryProvider: new Cesium.UrlTemplateImageryProvider({
+      url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      credit: '© OpenStreetMap contributors',
+      maximumLevel: 19,
+    }),
+    terrainProvider: new Cesium.EllipsoidTerrainProvider(),
+    baseLayerPicker: false,
+    geocoder: false,
+    homeButton: false,
+    sceneModePicker: false,
+    navigationHelpButton: false,
+    animation: false,
+    timeline: false,
+    fullscreenButton: false,
+    infoBox: false,
+    selectionIndicator: false,
+    requestRenderMode: true,
+  });
+
+  // Dark "space" around the globe for contrast.
+  viewer.scene.backgroundColor = Cesium.Color.fromCssColorString('#0a0e14');
+  viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a2332');
+  viewer.scene.globe.showGroundAtmosphere = true;
+
+  // Start with a view of Earth.
+  viewer.camera.setView({
+    destination: Cesium.Cartesian3.fromDegrees(-60, 15, 18_000_000),
+  });
+
+  // ------------------------------------------------------------------------ //
+  // State                                                                    //
+  // ------------------------------------------------------------------------ //
+  const state = {
+    scenes: [],
+    classNames: [],
+    defaultClasses: [],
+    currentScene: null,
+    sceneMarkers: [],            // point entities
+    layers: {                     // GeoJsonDataSources currently on the globe
+      detections: null,
+      paths: null,
+      final: null,
+    },
+  };
+
+  // ------------------------------------------------------------------------ //
+  // Helpers                                                                  //
+  // ------------------------------------------------------------------------ //
+  const $ = (id) => document.getElementById(id);
+
+  function setStatus(msg, kind = 'info') {
+    const el = $('status');
+    el.className = kind;
+    el.innerHTML = kind === 'info' && msg.includes('…')
+      ? `<span class="spinner"></span>${msg}`
+      : msg;
+    el.style.display = 'block';
+  }
+
+  function clearStatus() { $('status').style.display = 'none'; }
+
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) {
+      let detail = r.statusText;
+      try { detail = (await r.json()).detail ?? detail; } catch {}
+      throw new Error(`${r.status}: ${detail}`);
+    }
+    return r.json();
+  }
+
+  function removeLayer(key) {
+    const ds = state.layers[key];
+    if (ds) { viewer.dataSources.remove(ds, true); state.layers[key] = null; }
+  }
+
+  function clearForecastLayers() {
+    removeLayer('paths');
+    removeLayer('final');
+    $('forecastStats').style.display = 'none';
+  }
+
+  function clearAllOverlays() {
+    removeLayer('detections');
+    clearForecastLayers();
+  }
+
+  function formatSceneTitle(sceneId) {
+    if (!sceneId) return 'Honduras';
+    if (sceneId.includes('18-9-20')) return 'Honduras Sep 18';
+    if (sceneId.includes('23-9-20')) return 'Honduras Sep 23';
+    return sceneId.replace(/^S2_/, '').replaceAll('_', ' ');
+  }
+
+  // ------------------------------------------------------------------------ //
+  // Scene loading                                                            //
+  // ------------------------------------------------------------------------ //
+  async function loadScenes() {
+    try {
+      const idx = await api('/api/scenes');
+      state.scenes = idx.scenes || [];
+      state.classNames = idx.class_names || [];
+      state.defaultClasses = idx.default_debris_classes || [];
+      renderSceneList();
+      plotSceneMarkers();
+      renderClassList();
+      if (state.scenes.length) {
+        await selectScene(state.scenes[0], { flyTo: false });
+      }
+      setStatus(
+        `Loaded ${state.scenes.length} scenes - OSCAR window ${idx.oscar_coverage?.start ?? 'missing'} to ${idx.oscar_coverage?.end ?? 'missing'}`,
+        'ok',
+      );
+    } catch (e) {
+      $('scenes').textContent = '';
+      setStatus('Failed to load scenes: ' + e.message, 'err');
+    }
+  }
+
+  function renderSceneList() {
+    const root = $('scenes');
+    root.innerHTML = '';
+    if (state.scenes.length === 0) {
+      root.innerHTML = '<div style="font-size:12px;color:var(--muted);">No scenes yet. Run <code>python -m src.pipeline.build_scenes</code>.</div>';
+      return;
+    }
+    for (const s of state.scenes) {
+      const el = document.createElement('div');
+      el.className = 'scene';
+      el.dataset.sceneId = s.scene_id;
+      el.innerHTML = `
+        <div class="sid"><span class="dot"></span>${s.scene_id}</div>
+        <div class="meta">${s.obs_date || '?'} - ${s.n_detections}/${s.n_tiles} debris tiles</div>
+      `;
+      el.addEventListener('click', () => selectScene(s, { flyTo: true }));
+      root.appendChild(el);
+    }
+  }
+
+  function plotSceneMarkers() {
+    for (const e of state.sceneMarkers) viewer.entities.remove(e);
+    state.sceneMarkers = [];
+
+    for (const s of state.scenes) {
+      if (s.centroid_lat == null || s.centroid_lon == null) continue;
+      const e = viewer.entities.add({
+        id: 'scene:' + s.scene_id,
+        name: s.scene_id,
+        position: Cesium.Cartesian3.fromDegrees(s.centroid_lon, s.centroid_lat),
+        point: {
+          pixelSize: 12 + Math.min(10, Math.log2(s.n_detections + 1) * 2),
+          color: Cesium.Color.fromCssColorString('#ff4757'),
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+        label: {
+          text: String(s.n_detections),
+          font: 'bold 11px sans-serif',
+          fillColor: Cesium.Color.WHITE,
+          showBackground: true,
+          backgroundColor: Cesium.Color.fromCssColorString('rgba(0,0,0,0.6)'),
+          backgroundPadding: new Cesium.Cartesian2(6, 4),
+          style: Cesium.LabelStyle.FILL,
+          horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
+          verticalOrigin: Cesium.VerticalOrigin.CENTER,
+          pixelOffset: new Cesium.Cartesian2(14, 0),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
+        },
+        description: `
+          <table style="color:#222;">
+            <tr><th style="text-align:left; padding-right:12px;">Date</th><td>${s.obs_date || '?'}</td></tr>
+            <tr><th style="text-align:left; padding-right:12px;">Detections</th><td>${s.n_detections} / ${s.n_tiles} tiles</td></tr>
+            <tr><th style="text-align:left; padding-right:12px;">Centroid</th><td>${s.centroid_lat.toFixed(3)}, ${s.centroid_lon.toFixed(3)}</td></tr>
+            <tr><th style="text-align:left; padding-right:12px;">OSCAR</th><td>${s.has_oscar_coverage ? 'available' : 'missing'}</td></tr>
+          </table>
+        `,
+        _sceneMeta: s,
+      });
+      state.sceneMarkers.push(e);
+    }
+    if (state.sceneMarkers.length) {
+      viewer.flyTo(state.sceneMarkers, { duration: 2.5 });
+    }
+  }
+
+  async function selectScene(s, { flyTo } = { flyTo: false }) {
+    state.currentScene = s;
+    clearAllOverlays();
+    clearStatus();
+
+    // List UI
+    document.querySelectorAll('.scene').forEach((el) => {
+      el.classList.toggle('active', el.dataset.sceneId === s.scene_id);
+    });
+
+    // Form UI
+    $('forecastForm').style.display = 'block';
+    $('selectedSceneName').textContent = s.scene_id;
+    $('pageTitle').textContent = `${formatSceneTitle(s.scene_id)} drift forecast`;
+
+    // Camera
+    if (flyTo && s.centroid_lat != null && s.centroid_lon != null) {
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(
+          s.centroid_lon + 20,
+          s.centroid_lat + 2,
+          8_500_000,
+        ),
+        duration: 1.6,
+      });
+    }
+
+    // Detection polygons
+    try {
+      const ds = await Cesium.GeoJsonDataSource.load(
+        `/api/scenes/${encodeURIComponent(s.scene_id)}/detections`,
+        {
+          stroke: Cesium.Color.fromCssColorString('#ff4757'),
+          fill: Cesium.Color.fromCssColorString('rgba(255,71,87,0.32)'),
+          strokeWidth: 2,
+          clampToGround: true,
+        },
+      );
+      await viewer.dataSources.add(ds);
+      state.layers.detections = ds;
+      setStatus(`Scene ${s.scene_id} - ${s.n_detections} debris tile(s) loaded`, 'ok');
+    } catch (e) {
+      setStatus('Could not load detection polygons: ' + e.message, 'err');
+    }
+  }
+
+  function renderClassList() {
+    const root = $('classList');
+    root.innerHTML = '';
+    for (const cls of state.defaultClasses) {
+      const row = document.createElement('label');
+      row.className = 'class-row';
+      row.innerHTML = `
+        <input type="checkbox" value="${cls}" ${cls === 0 ? 'checked' : ''}>
+        ${state.classNames[cls] ?? ('class ' + cls)}
+      `;
+      root.appendChild(row);
+    }
+  }
+
+  // ------------------------------------------------------------------------ //
+  // Forecast                                                                 //
+  // ------------------------------------------------------------------------ //
+  async function runForecast() {
+    if (!state.currentScene) { setStatus('Pick a scene first.', 'err'); return; }
+
+    const btn = $('runForecast');
+    const classes = [...document.querySelectorAll('#classList input:checked')].map((i) => +i.value);
+    if (classes.length === 0) { setStatus('Pick at least one debris class.', 'err'); return; }
+
+    const body = {
+      scene_id: state.currentScene.scene_id,
+      days: +$('days').value,
+      n_per_seed: +$('nPerSeed').value,
+      seed_radius_m: +$('seedRadius').value,
+      horizontal_diffusivity: +$('diffusivity').value,
+      debris_classes: classes,
+    };
+
+    clearForecastLayers();
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Running...';
+    setStatus('Running OpenDrift simulation... (first run ~20-60s, cached reruns are instant)', 'info');
+
+    const t0 = performance.now();
+    try {
+      const resp = await api('/api/forecast', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      // Per-particle paths (polylines).
+      const pathDs = await Cesium.GeoJsonDataSource.load(resp.paths_url, {
+        stroke: Cesium.Color.fromCssColorString('#50b4ff').withAlpha(0.22),
+        strokeWidth: 1,
+        clampToGround: true,
+      });
+      await viewer.dataSources.add(pathDs);
+      state.layers.paths = pathDs;
+
+      // Final positions (points).
+      const finalDs = await Cesium.GeoJsonDataSource.load(resp.final_url, {
+        markerSize: 8,
+        markerColor: Cesium.Color.fromCssColorString('#ffa502'),
+        clampToGround: true,
+      });
+      await viewer.dataSources.add(finalDs);
+      state.layers.final = finalDs;
+
+      // Stats panel
+      const wall = ((performance.now() - t0) / 1000).toFixed(1);
+      const cachedTag = resp.cached
+        ? `<span class="v cached">cached</span>`
+        : `<span class="v">${resp.stats.elapsed_s}s</span>`;
+      $('forecastStats').style.display = 'grid';
+      $('forecastStats').innerHTML = `
+        <span class="k">Particles</span><span class="v">${resp.stats.n_particles}</span>
+        <span class="k">Paths</span><span class="v">${resp.stats.n_features_paths}</span>
+        <span class="k">Final pts</span><span class="v">${resp.stats.n_features_final}</span>
+        <span class="k">Compute</span>${cachedTag}
+        <span class="k">Wall time</span><span class="v">${wall}s</span>
+        <span class="k">Cache key</span><span class="v" style="font-size:10px;">${resp.cache_key}</span>
+      `;
+      setStatus(
+        resp.cached
+          ? `Loaded cached forecast (${resp.stats.n_particles} particles, ${wall}s round-trip).`
+          : `Forecast complete: ${resp.stats.n_particles} particles in ${resp.stats.elapsed_s}s compute.`,
+        'ok',
+      );
+    } catch (e) {
+      setStatus('Forecast failed: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Run Forecast';
+    }
+  }
+
+  // ------------------------------------------------------------------------ //
+  // Wiring                                                                   //
+  // ------------------------------------------------------------------------ //
+  $('runForecast').addEventListener('click', runForecast);
+  $('clearForecast').addEventListener('click', () => {
+    clearForecastLayers();
+    setStatus('Forecast layers cleared.', 'info');
+  });
+
+  // Click a marker on the globe -> select that scene.
+  viewer.selectedEntityChanged.addEventListener((entity) => {
+    if (entity && entity._sceneMeta) {
+      selectScene(entity._sceneMeta, { flyTo: true });
+    }
+  });
+
+  // Boot.
+  loadScenes();
+</script>
+</body>
+</html>
