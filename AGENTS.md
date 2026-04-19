@@ -204,6 +204,30 @@ python -m src.training.train --synthetic --epochs 2 --batch-size 4
 
 ---
 
+## Frontend
+
+The hackathon UI is a Next.js 16 + globe.gl app in `frontend/frontend/`.
+The legacy Cesium HTML UI lives in `web/legacy/` and is served at `/legacy/`.
+
+```bash
+# Dev: backend on :8000, frontend on :3000 (CORS open)
+uvicorn src.api.server:app --reload --reload-dir src
+cd frontend/frontend && cp .env.example .env.local && npm install && npm run dev
+
+# Prod: build static export, FastAPI serves it at /
+scripts/build_frontend.sh
+uvicorn src.api.server:app
+```
+
+`--reload-dir src` is important — without it, uvicorn watches `frontend/frontend/node_modules`
+and reloads constantly. Or just run `python -m src.api.server` (already configured).
+
+API access goes through `frontend/frontend/lib/api.ts` (typed wrappers around
+the `/api/*` routes in `src/api/server.py`). Don't add raw `fetch` calls in
+components.
+
+---
+
 ## Key invariants — do not break these
 
 - Never reshuffle train/val/test splits — they are scene-aware.

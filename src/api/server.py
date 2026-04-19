@@ -71,7 +71,7 @@ _drift_lock = threading.Lock()
 # --------------------------------------------------------------------------- #
 class ForecastRequest(BaseModel):
     scene_id: str
-    days: int = Field(7, ge=1, le=30)
+    days: int = Field(7, ge=1, le=180)
     n_per_seed: int = Field(100, ge=10, le=500)
     seed_radius_m: float = Field(1000.0, ge=10.0, le=50000.0)
     horizontal_diffusivity: float = Field(10.0, ge=0.0, le=500.0)
@@ -82,6 +82,9 @@ class ForecastRequest(BaseModel):
     wind_speed_ms: float = Field(0.0, ge=0.0, le=40.0)
     wind_dir_deg: float = Field(0.0, ge=0.0, lt=360.0)
     wind_drift_factor: float = Field(0.0, ge=0.0, le=0.10)
+    # Surface-current product: "oscar" (geostrophic only) or
+    # "glorys" (GLORYS12V1 total currents incl. Ekman; needs CMEMS creds).
+    current_source: str = Field("glorys", pattern="^(oscar|glorys)$")
 
 
 class ForecastStats(BaseModel):
@@ -120,6 +123,26 @@ def _scene_dir(scene_id: str) -> Path:
     return d
 
 
+def _scene_obs_date(scene_dir: Path) -> tuple[str | None, bool]:
+    """Pull obs_date out of meta.json so synthetic scenes (no MARIDA index)
+    can still resolve seed dates without forcing CLI flags through the API.
+
+    Returns (obs_date, force_override). For real MARIDA scenes the date is
+    just a fallback; for synthetic scenes it's the only source of truth.
+    """
+    meta_path = scene_dir / "meta.json"
+    if not meta_path.exists():
+        return None, False
+    try:
+        meta = json.loads(meta_path.read_text())
+    except json.JSONDecodeError:
+        return None, False
+    d = meta.get("obs_date")
+    if not isinstance(d, str):
+        return None, False
+    return d, bool(meta.get("synthetic", False))
+
+
 def _cache_key(req: ForecastRequest) -> str:
     """Stable hash over normalized params. Same inputs -> same cache dir."""
     payload = {
@@ -134,6 +157,7 @@ def _cache_key(req: ForecastRequest) -> str:
         "wind_speed_ms": round(req.wind_speed_ms, 3),
         "wind_dir_deg": round(req.wind_dir_deg, 1),
         "wind_drift_factor": round(req.wind_drift_factor, 4),
+        "current_source": req.current_source,
     }
     blob = json.dumps(payload, sort_keys=True).encode()
     return hashlib.sha1(blob).hexdigest()[:16]
@@ -262,6 +286,7 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
     (cache_dir / "params.json").write_text(req.model_dump_json(indent=2))
 
     out_stem = cache_dir / "run"
+    scene_obs_date, force_override = _scene_obs_date(scene_dir)
 
     t0 = time.perf_counter()
     with _drift_lock:
@@ -279,6 +304,9 @@ def forecast(req: ForecastRequest) -> ForecastResponse:
                 wind_speed_ms=req.wind_speed_ms,
                 wind_dir_deg=req.wind_dir_deg,
                 wind_drift_factor=req.wind_drift_factor,
+                current_source=req.current_source,
+                default_date=scene_obs_date,
+                override_date=force_override,
             )
         except RuntimeError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e

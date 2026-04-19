@@ -86,8 +86,12 @@ def concat_oscar(
         out_path = Path(f"data/forecast/oscar_concat_{s}_{e}.nc")
 
     if out_path.exists() and not overwrite:
-        print(f"[oscar_concat] reusing existing {out_path}")
-        return out_path
+        if out_path.stat().st_size > 0:
+            print(f"[oscar_concat] reusing existing {out_path}")
+            return out_path
+        # Truncated/aborted prior run — never reuse a 0-byte file.
+        print(f"[oscar_concat] removing empty cache file {out_path}")
+        out_path.unlink()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -178,8 +182,14 @@ def concat_oscar(
             "calendar": "standard",
         },
     }
-    ds_out.to_netcdf(out_path, format="NETCDF4", engine="netcdf4", encoding=encoding)
-    ds_out.close()
+    # Write to a tempfile then atomically rename so a crash mid-write can't
+    # leave a 0-byte file that future runs would try to reuse.
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    try:
+        ds_out.to_netcdf(tmp_path, format="NETCDF4", engine="netcdf4", encoding=encoding)
+    finally:
+        ds_out.close()
+    tmp_path.replace(out_path)
 
     print(f"[oscar_concat] wrote {out_path}  shape u={u.shape}  "
           f"time_range={time_arr[0]}..{time_arr[-1]}")

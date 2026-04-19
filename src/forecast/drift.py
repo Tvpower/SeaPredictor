@@ -29,12 +29,19 @@ from pathlib import Path
 
 import numpy as np
 
+from src.forecast.glorys_fetch import bbox_from_seeds, fetch_glorys
 from src.forecast.oscar_concat import concat_oscar
 from src.forecast.seed import (
     DEFAULT_DEBRIS_CLASSES,
     Seed,
     extract_seeds,
 )
+
+
+# Which surface-current product feeds OpenDrift.
+#   "oscar"  : NOAA OSCAR daily, 1/4 deg, geostrophic-only (Ekman EXCLUDED)
+#   "glorys" : CMEMS GLORYS12V1, 1/12 deg, total currents (Ekman INCLUDED)
+CurrentSource = str  # Literal["oscar", "glorys"] kept loose for FastAPI
 
 
 def _wind_components(speed_ms: float, dir_from_deg: float) -> tuple[float, float]:
@@ -295,6 +302,9 @@ def run_drift(
     wind_speed_ms: float = 0.0,
     wind_dir_deg: float = 0.0,
     wind_drift_factor: float = 0.0,
+    current_source: CurrentSource = "oscar",
+    glorys_nc_path: Path | None = None,
+    glorys_bbox_buffer_deg: float = 5.0,
 ) -> Path:
     """Main entry: turn detections into a drift forecast. Returns out_stem."""
     from datetime import date as _date
@@ -326,14 +336,36 @@ def run_drift(
     print(f"[drift] simulation window {start_date}..{end_date}  "
           f"(forward {days} days)")
 
-    oscar_path = oscar_concat_path or concat_oscar(
-        start=start_date - timedelta(days=1),
-        end=end_date + timedelta(days=1),
-    )
+    src_norm = current_source.lower()
+    if src_norm not in {"oscar", "glorys"}:
+        raise ValueError(
+            f"current_source must be 'oscar' or 'glorys', got {current_source!r}"
+        )
+
+    if src_norm == "glorys":
+        if glorys_nc_path is None:
+            bbox = bbox_from_seeds(
+                lats=[s.lat for s in seeds],
+                lons=[s.lon for s in seeds],
+                buffer_deg=glorys_bbox_buffer_deg,
+            )
+            glorys_nc_path = fetch_glorys(
+                bbox=bbox,
+                start=start_date - timedelta(days=1),
+                end=end_date + timedelta(days=1),
+            )
+        currents_path = glorys_nc_path
+        print(f"[drift] currents: GLORYS12V1 (total surface) -> {currents_path}")
+    else:
+        currents_path = oscar_concat_path or concat_oscar(
+            start=start_date - timedelta(days=1),
+            end=end_date + timedelta(days=1),
+        )
+        print(f"[drift] currents: OSCAR (geostrophic only) -> {currents_path}")
 
     _suppress_opendrift_logs()
     model = OceanDrift(loglevel=30)
-    reader = reader_netCDF_CF_generic.Reader(str(oscar_path))
+    reader = reader_netCDF_CF_generic.Reader(str(currents_path))
     model.add_reader(reader)
 
     u_wind, v_wind = _wind_components(wind_speed_ms, wind_dir_deg)
@@ -435,6 +467,14 @@ def main() -> None:
     parser.add_argument("--wind-drift-factor", type=float, default=0.0,
                         help="Per-particle leeway as fraction of wind speed "
                              "(0.02-0.04 typical for floating debris)")
+    parser.add_argument("--current-source", type=str, default="oscar",
+                        choices=["oscar", "glorys"],
+                        help="Surface-current product. 'glorys' includes Ekman "
+                             "(needs Copernicus Marine credentials).")
+    parser.add_argument("--glorys-nc", type=Path, default=None,
+                        help="Pre-downloaded GLORYS NetCDF; auto-fetched if omitted.")
+    parser.add_argument("--glorys-buffer-deg", type=float, default=5.0,
+                        help="Bbox padding around seeds when auto-downloading GLORYS.")
     args = parser.parse_args()
 
     run_drift(
@@ -453,6 +493,9 @@ def main() -> None:
         wind_speed_ms=args.wind_speed,
         wind_dir_deg=args.wind_dir,
         wind_drift_factor=args.wind_drift_factor,
+        current_source=args.current_source,
+        glorys_nc_path=args.glorys_nc,
+        glorys_bbox_buffer_deg=args.glorys_buffer_deg,
     )
 
 
