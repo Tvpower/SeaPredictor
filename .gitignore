@@ -11,6 +11,8 @@ __pycache__/
 
 # data + checkpoints
 data/raw/
+data/data/
+data/processed/
 !data/raw/MARIDA/norm_stats.json
 !data/raw/MARIDA/class_weights.json
 checkpoints/
@@ -19,6 +21,12 @@ checkpoints/
 *.nc
 *.tif
 *.tiff
+
+# forecast outputs
+forecast/
+data/forecast/
+predictions.json
+*.geojson
 
 # IDE
 .idea/

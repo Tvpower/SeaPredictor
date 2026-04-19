@@ -15,6 +15,41 @@ cp .env.example .env
 python -m src.training.train --synthetic --epochs 2 --batch-size 4
 ```
 
+### Training on Apple Silicon (MPS / Metal)
+
+The training stack auto-detects MPS on Apple Silicon Macs — no flags required.
+What's wired up for you:
+
+- `default_device()` returns `"mps"` when available.
+- `num_workers` defaults to `0` on MPS (PyTorch DataLoader workers fork badly on
+  macOS and routinely crash the run).
+- `pin_memory` is disabled on MPS (only useful for CUDA's pinned host transfers).
+- `PYTORCH_ENABLE_MPS_FALLBACK=1` is set automatically so any op Metal hasn't
+  implemented yet falls back to CPU instead of erroring.
+- Metrics (torchmetrics) are computed on CPU, since Metal coverage there is uneven.
+- `torch.mps.manual_seed` is called alongside `torch.manual_seed` for reproducibility.
+
+```bash
+# Smoke test on MPS (auto-detected)
+python -m src.training.train --synthetic --epochs 2 --batch-size 8
+
+# Force CPU if you need to debug
+python -m src.training.train --synthetic --device cpu
+
+# Real training on M-series with full pretrained ResNet-18
+python -m src.training.train --epochs 30 --batch-size 16
+```
+
+Notes:
+
+- Keep batch size modest (8–16 on M1/M2 8 GB, 16–32 on 16 GB+). Activations for
+  256×256 ResNet-18 + a 30-step LSTM add up.
+- Mixed precision (`autocast`) on MPS is still flaky in PyTorch 2.x; the loop
+  runs in fp32. If you want to experiment, wrap the forward in
+  `torch.autocast(device_type="mps", dtype=torch.float16)` — expect occasional
+  numerical issues with `BCEWithLogitsLoss` + `pos_weight`.
+- First run downloads the pretrained ResNet-18 weights to `~/.cache/torch/hub`.
+
 ## Layout
 
 ```

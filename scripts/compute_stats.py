@@ -21,7 +21,7 @@ from src.dataset.marida_dataset import load_patch, load_mask, aggregate_classes
 from src.dataset.spectral_indices import stack_indices
 from src.dataset.normalization import compute_band_stats, compute_class_weights, save_stats
 
-DATA_ROOT   = Path("data/raw/MARIDA")
+DATA_ROOT   = Path("../data/data/raw/MARIDA")
 PATCHES_DIR = DATA_ROOT / "patches"
 SPLITS_DIR  = DATA_ROOT / "splits"
 TRAIN_SPLIT = SPLITS_DIR / "train_X.txt"

@@ -18,7 +18,7 @@ from src.dataset.marida_dataset import (
 )
 from src.dataset.spectral_indices import stack_indices, validate_indices
 
-DATA_ROOT   = Path("data/raw/MARIDA")
+DATA_ROOT   = Path("../data/data/raw/MARIDA")
 PATCHES_DIR = DATA_ROOT / "patches"
 SPLITS_DIR  = DATA_ROOT / "splits"
 TRAIN_SPLIT = SPLITS_DIR / "train_X.txt"

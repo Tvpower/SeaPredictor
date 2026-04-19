@@ -13,6 +13,6 @@ if not HF_TOKEN:
 snapshot_download(
     repo_id="HallowsYves/SeaPredictor",
     repo_type="dataset",
-    local_dir="data/raw/MARIDA",
+    local_dir="../data/data/raw/MARIDA",
     token=HF_TOKEN,
 )
